@@ -76,6 +76,88 @@ const float MarginBetweenViews = 30.0f;
 const float ColorPickerLabelSize = 13.0f;
 const float ColorPickerLineSpacing = 5.0f;
 
+struct SFastInputAutoSettings
+{
+	bool m_Running = false;
+	int m_Mode = 0;
+	int m_Preference = 1;
+	int m_Samples = 0;
+	int m_Sum = 0;
+	int m_Min = 9999;
+	int m_Max = 0;
+	int64_t m_StartTime = 0;
+	int64_t m_LastSampleTime = 0;
+	char m_aStatus[128] = "";
+};
+
+static float FastInputPreferenceOffset(int Preference)
+{
+	if(Preference == 0)
+		return -4.0f;
+	if(Preference == 2)
+		return 5.0f;
+	return 0.0f;
+}
+
+static int FastInputAutoAmountMs(int Mode, int AvgPing, int Jitter, int Preference)
+{
+	const float Base = Mode == 2 ? 15.0f : 10.0f;
+	const float PingFactor = Mode == 2 ? 0.12f : 0.10f;
+	const int MaxAmount = Mode == 2 ? 40 : 38;
+	return std::clamp(round_to_int(Base + AvgPing * PingFactor + Jitter * 0.35f + FastInputPreferenceOffset(Preference)), 6, MaxAmount);
+}
+
+static float FastInputAutoSaikoAmount(int AvgPing, int Jitter, int Preference)
+{
+	return std::clamp((FastInputAutoAmountMs(1, AvgPing, Jitter, Preference) / 20.0f) + Jitter / 160.0f, 0.4f, 2.4f);
+}
+
+static int FastInputAutoBestPlusAggression(int AvgPing, int Jitter, int Preference)
+{
+	const int PreferenceOffset = Preference == 0 ? -12 : Preference == 2 ? 10 :
+									       0;
+	return std::clamp(round_to_int(72.0f + AvgPing * 0.08f - Jitter * 1.8f + PreferenceOffset), 35, 90);
+}
+
+static int FastInputAutoBestPlusMovementMs(int AvgPing, int Jitter, int Preference)
+{
+	const int PreferenceOffset = Preference == 0 ? -4 : Preference == 2 ? 5 :
+									      0;
+	return std::clamp(round_to_int(20.0f + AvgPing * 0.18f - Jitter * 0.12f + PreferenceOffset), 14, 60);
+}
+
+static int FastInputAutoBestPlusAimHookMs(int AvgPing, int Jitter, int Preference)
+{
+	const int PreferenceOffset = Preference == 0 ? -4 : Preference == 2 ? 4 :
+									      0;
+	return std::clamp(round_to_int(18.0f + AvgPing * 0.16f - Jitter * 0.16f + PreferenceOffset), 14, 60);
+}
+
+static const char *FastInputPreferenceName(int Preference)
+{
+	if(Preference == 0)
+		return "Small";
+	if(Preference == 2)
+		return "Big";
+	return "Medium";
+}
+
+static void FastInputApplyAutoSettings(int Mode, int AvgPing, int Jitter, int Preference)
+{
+	if(Mode == 0)
+		g_Config.m_TcFastInputAmount = FastInputAutoAmountMs(Mode, AvgPing, Jitter, Preference);
+	else if(Mode == 1)
+		g_Config.m_TcFastInputSaikoAmount = FastInputAutoSaikoAmount(AvgPing, Jitter, Preference);
+	else if(Mode == 2)
+		g_Config.m_TcFastInputBestAmount = FastInputAutoAmountMs(Mode, AvgPing, Jitter, Preference);
+	else if(Mode == 3)
+	{
+		g_Config.m_TcFastInputBestPlusAggression = FastInputAutoBestPlusAggression(AvgPing, Jitter, Preference);
+		g_Config.m_TcFastInputBestPlusMovement = FastInputAutoBestPlusMovementMs(AvgPing, Jitter, Preference);
+		g_Config.m_TcFastInputBestPlusAimHook = FastInputAutoBestPlusAimHookMs(AvgPing, Jitter, Preference);
+	}
+}
+
 static void SetFlag(int32_t &Flags, int n, bool Value)
 {
 	if(Value)
@@ -175,6 +257,52 @@ bool CMenus::DoSliderWithScaledValue(const void *pId, int *pOption, const CUIRec
 	if(*pOption != Value)
 	{
 		*pOption = Value;
+		return true;
+	}
+	return false;
+}
+
+bool CMenus::DoSliderWithFloatValue(const void *pId, float *pOption, const CUIRect *pRect, const char *pStr, float Min, float Max, unsigned Flags, const char *pSuffix)
+{
+	const bool NoClampValue = Flags & CUi::SCROLLBAR_OPTION_NOCLAMPVALUE;
+
+	float Value = *pOption;
+	const float Increment = std::max(0.001f, (Max - Min) / 1000.0f);
+	if(Input()->ModifierIsPressed() && Input()->KeyPress(KEY_MOUSE_WHEEL_UP) && Ui()->MouseInside(pRect))
+	{
+		Value += Increment;
+		Value = std::clamp(Value, Min, Max);
+	}
+	if(Input()->ModifierIsPressed() && Input()->KeyPress(KEY_MOUSE_WHEEL_DOWN) && Ui()->MouseInside(pRect))
+	{
+		Value -= Increment;
+		Value = std::clamp(Value, Min, Max);
+	}
+
+	char aBuf[256];
+	str_format(aBuf, sizeof(aBuf), "%s: %.2f%s", pStr, Value, pSuffix);
+
+	float ScrollValue = Value;
+	if(NoClampValue)
+		ScrollValue = std::clamp(ScrollValue, Min, Max);
+
+	CUIRect Label, ScrollBar;
+	pRect->VSplitMid(&Label, &ScrollBar, minimum(10.0f, pRect->w * 0.05f));
+
+	const float LabelFontSize = Label.h * CUi::ms_FontmodHeight * 0.8f;
+	Ui()->DoLabel(&Label, aBuf, LabelFontSize, TEXTALIGN_ML);
+
+	float RelativeValue = Max > Min ? (ScrollValue - Min) / (Max - Min) : 0.0f;
+	RelativeValue = std::clamp(RelativeValue, 0.0f, 1.0f);
+	RelativeValue = Ui()->DoScrollbarH(pId, &ScrollBar, RelativeValue);
+	ScrollValue = Min + RelativeValue * (Max - Min);
+	if(NoClampValue && ((ScrollValue == Min && Value < Min) || (ScrollValue == Max && Value > Max)))
+		ScrollValue = Value;
+
+	ScrollValue = std::clamp(ScrollValue, Min, Max);
+	if(absolute(*pOption - ScrollValue) > 0.000001f)
+	{
+		*pOption = ScrollValue;
 		return true;
 	}
 	return false;
@@ -372,6 +500,18 @@ void CMenus::RenderSettingsTClient(CUIRect MainView)
 		RenderSettingsTClientInfo(MainView);
 }
 
+void CMenus::RenderSettingsTClientMicroAssist(CUIRect &Column)
+{
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcMicroDirectionAssist, TCLocalize("Micro Direction Assist"), &g_Config.m_TcMicroDirectionAssist, &Column, LineSize);
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcHookTimingBuffer, TCLocalize("Hook Timing Buffer"), &g_Config.m_TcHookTimingBuffer, &Column, LineSize);
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcJumpBuffer, TCLocalize("Jump Buffer"), &g_Config.m_TcJumpBuffer, &Column, LineSize);
+}
+
+void CMenus::RenderSettingsTClientFocusMode(CUIRect &Column)
+{
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcFocusMode, TCLocalize("Only show team chat while running"), &g_Config.m_TcFocusMode, &Column, LineSize);
+}
+
 void CMenus::RenderSettingsTClientSettings(CUIRect MainView)
 {
 	CUIRect Column, LeftView, RightView, Button, Label;
@@ -554,22 +694,8 @@ void CMenus::RenderSettingsTClientSettings(CUIRect MainView)
 	Ui()->DoLabel(&Label, TCLocalize("Input"), HeadlineFontSize, TEXTALIGN_ML);
 	Column.HSplitTop(MarginSmall, nullptr, &Column);
 
-	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcFastInput, TCLocalize("Fast Input (reduced visual delay)"), &g_Config.m_TcFastInput, &Column, LineSize);
-
-	Column.HSplitTop(LineSize, &Button, &Column);
-	DoSliderWithScaledValue(&g_Config.m_TcFastInputAmount, &g_Config.m_TcFastInputAmount, &Button, TCLocalize("Amount"), 1, 40, 1, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, "ms");
-
-	Column.HSplitTop(MarginSmall, nullptr, &Column);
-	if(g_Config.m_TcFastInput)
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcFastInputOthers, TCLocalize("Fast Input others"), &g_Config.m_TcFastInputOthers, &Column, LineSize);
-	else
-		Column.HSplitTop(LineSize, nullptr, &Column);
-
 	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClSubTickAiming, TCLocalize("Sub-Tick aiming"), &g_Config.m_ClSubTickAiming, &Column, LineSize);
-
-	// A little extra spacing because these are multi line
 	Column.HSplitTop(MarginSmall, nullptr, &Column);
-
 	s_SectionBoxes.back().h = Column.y - s_SectionBoxes.back().y;
 
 	// ***** Anti Latency Tools ***** //
@@ -679,6 +805,9 @@ void CMenus::RenderSettingsTClientSettings(CUIRect MainView)
 	Column.HSplitTop(HeadlineHeight, &Label, &Column);
 	Ui()->DoLabel(&Label, TCLocalize("Auto Reply"), HeadlineFontSize, TEXTALIGN_ML);
 	Column.HSplitTop(MarginSmall, nullptr, &Column);
+
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcIgnoreTag, TCLocalize("Ignore tag until safe"), &g_Config.m_TcIgnoreTag, &Column, LineSize);
+	Column.HSplitTop(MarginExtraSmall, nullptr, &Column);
 
 	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAutoReplyMuted, TCLocalize("Auto reply to muted players"), &g_Config.m_TcAutoReplyMuted, &Column, LineSize);
 	CUIRect MutedReply;
@@ -2039,7 +2168,8 @@ void CMenus::RenderSettingsTClientInfo(CUIRect MainView)
 	MainView.VSplitMid(&LeftView, &RightView, MarginBetweenViews);
 	LeftView.VSplitLeft(MarginSmall, nullptr, &LeftView);
 	RightView.VSplitRight(MarginSmall, &RightView, nullptr);
-	LeftView.HSplitMid(&LeftView, &LowerLeftView, 0.0f);
+	const float ConfigFilesHeight = LineSize * 4.0f + MarginSmall * 2.0f + HeadlineFontSize;
+	LeftView.HSplitBottom(ConfigFilesHeight + MarginBetweenSections, &LeftView, &LowerLeftView);
 
 	LeftView.HSplitTop(HeadlineHeight, &Label, &LeftView);
 	Ui()->DoLabel(&Label, TCLocalize("TClient Links"), HeadlineFontSize, TEXTALIGN_ML);
@@ -2065,7 +2195,7 @@ void CMenus::RenderSettingsTClientInfo(CUIRect MainView)
 		Client()->ViewLink("https://ko-fi.com/Totar");
 
 	LeftView = LowerLeftView;
-	LeftView.HSplitBottom(LineSize * 4.0f + MarginSmall * 2.0f + HeadlineFontSize, nullptr, &LeftView);
+	LeftView.HSplitBottom(ConfigFilesHeight, nullptr, &LeftView);
 	LeftView.HSplitTop(HeadlineHeight, &Label, &LeftView);
 	Ui()->DoLabel(&Label, TCLocalize("Config Files"), HeadlineFontSize, TEXTALIGN_ML);
 	LeftView.HSplitTop(MarginSmall, nullptr, &LeftView);
@@ -2169,7 +2299,6 @@ void CMenus::RenderSettingsTClientInfo(CUIRect MainView)
 			Client()->ViewLink("https://github.com/ChillerDragon");
 		RenderDevSkin(TeeRect.Center(), 50.0f, "glow_greensward", "greensward", false, 0, 0, 0, false, true, ColorRGBA(1.00f, 1.00f, 1.00f, 1.00f), ColorRGBA(1.00f, 0.02f, 0.13f, 1.00f));
 	}
-
 	RightView.HSplitTop(MarginSmall, nullptr, &RightView);
 	RightView.HSplitTop(HeadlineHeight, &Label, &RightView);
 	Ui()->DoLabel(&Label, TCLocalize("Hide Settings Tabs"), HeadlineFontSize, TEXTALIGN_ML);
@@ -2492,6 +2621,10 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 	{
 		int m_Value;
 	};
+	struct SFloatStage
+	{
+		float m_Value;
+	};
 	struct SStrStage
 	{
 		std::string m_Value;
@@ -2501,6 +2634,7 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 		unsigned m_Value;
 	};
 	static std::unordered_map<const SConfigVariable *, SIntStage> s_StagedInts;
+	static std::unordered_map<const SConfigVariable *, SFloatStage> s_StagedFloats;
 	static std::unordered_map<const SConfigVariable *, SStrStage> s_StagedStrs;
 	static std::unordered_map<const SConfigVariable *, SColStage> s_StagedCols;
 
@@ -2515,6 +2649,12 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 		CLineInputBuffered<512> m_Input;
 		bool m_Inited = false;
 	};
+	struct SFloatState
+	{
+		CLineInputNumber m_Input;
+		float m_LastValue = 0.0f;
+		bool m_Inited = false;
+	};
 	struct SColState
 	{
 		unsigned m_LastValue = 0;
@@ -2522,14 +2662,17 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 		bool m_Inited = false;
 	};
 	static std::unordered_map<const SConfigVariable *, SIntState> s_IntInputs;
+	static std::unordered_map<const SConfigVariable *, SFloatState> s_FloatInputs;
 	static std::unordered_map<const SConfigVariable *, SStrState> s_StrInputs;
 	static std::unordered_map<const SConfigVariable *, SColState> s_ColInputs;
 
 	auto ClearStagedAndCaches = [&]() {
 		s_StagedInts.clear();
+		s_StagedFloats.clear();
 		s_StagedStrs.clear();
 		s_StagedCols.clear();
 		s_IntInputs.clear();
+		s_FloatInputs.clear();
 		s_StrInputs.clear();
 		s_ColInputs.clear();
 	};
@@ -2545,7 +2688,7 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 
 	static CLineInputBuffered<128> s_SearchInput;
 
-	ChangesCount = s_StagedInts.size() + s_StagedStrs.size() + s_StagedCols.size();
+	ChangesCount = s_StagedInts.size() + s_StagedFloats.size() + s_StagedStrs.size() + s_StagedCols.size();
 	{
 		CUIRect LeftHalf, RightHalf;
 		ApplyBar.VSplitMid(&LeftHalf, &RightHalf, 0.0f);
@@ -2571,6 +2714,13 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 				const SConfigVariable *pVar = It.first;
 				char aCmd[256];
 				str_format(aCmd, sizeof(aCmd), "%s %d", pVar->m_pScriptName, It.second.m_Value);
+				Console()->ExecuteLine(aCmd, IConsole::CLIENT_ID_UNSPECIFIED);
+			}
+			for(const auto &It : s_StagedFloats)
+			{
+				const SConfigVariable *pVar = It.first;
+				char aCmd[256];
+				str_format(aCmd, sizeof(aCmd), "%s %.6g", pVar->m_pScriptName, It.second.m_Value);
 				Console()->ExecuteLine(aCmd, IConsole::CLIENT_ID_UNSPECIFIED);
 			}
 			for(const auto &It : s_StagedStrs)
@@ -2673,6 +2823,13 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 			auto It = s_StagedInts.find(p);
 			int Value = It != s_StagedInts.end() ? It->second.m_Value : *pInt->m_pVariable;
 			return Value == pInt->m_Default;
+		}
+		if(p->m_Type == SConfigVariable::VAR_FLOAT)
+		{
+			const SFloatConfigVariable *pFloat = static_cast<const SFloatConfigVariable *>(p);
+			auto It = s_StagedFloats.find(p);
+			float Value = It != s_StagedFloats.end() ? It->second.m_Value : *pFloat->m_pVariable;
+			return absolute(Value - pFloat->m_Default) < 0.000001f;
 		}
 		if(p->m_Type == SConfigVariable::VAR_STRING)
 		{
@@ -2812,6 +2969,11 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 					const SIntConfigVariable *pInt = static_cast<const SIntConfigVariable *>(pVar);
 					s_StagedInts[pVar] = {pInt->m_Default};
 				}
+				else if(pVar->m_Type == SConfigVariable::VAR_FLOAT)
+				{
+					const SFloatConfigVariable *pFloat = static_cast<const SFloatConfigVariable *>(pVar);
+					s_StagedFloats[pVar] = {pFloat->m_Default};
+				}
 				else if(pVar->m_Type == SConfigVariable::VAR_STRING)
 				{
 					const SStringConfigVariable *pStr = static_cast<const SStringConfigVariable *>(pVar);
@@ -2900,6 +3062,47 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 					s_StagedStrs.erase(pVar);
 				else
 					s_StagedStrs[pVar] = {std::string(NewVal)};
+			}
+		}
+		else if(pVar->m_Type == SConfigVariable::VAR_FLOAT)
+		{
+			const SFloatConfigVariable *pFloat = static_cast<const SFloatConfigVariable *>(pVar);
+			SFloatState &State = s_FloatInputs[pVar];
+			const float Effective = s_StagedFloats.contains(pVar) ? s_StagedFloats[pVar].m_Value : *pFloat->m_pVariable;
+			if(!State.m_Inited)
+			{
+				State.m_Input.SetFloat(Effective);
+				State.m_LastValue = Effective;
+				State.m_Inited = true;
+			}
+			else if(!State.m_Input.IsActive() && absolute(State.m_LastValue - Effective) > 0.000001f)
+			{
+				State.m_Input.SetFloat(Effective);
+				State.m_LastValue = Effective;
+			}
+
+			CUIRect InputBox, Dummy;
+			Controls.VSplitLeft(80.0f, &InputBox, &Dummy);
+
+			if(Ui()->DoEditBox(&State.m_Input, &InputBox, EditBoxFontSize))
+			{
+				float NewVal = State.m_Input.GetFloat();
+				bool InRange = true;
+				if(pFloat->m_Min != pFloat->m_Max)
+				{
+					if(NewVal < pFloat->m_Min)
+						InRange = false;
+					if(pFloat->m_Max != 0.0f && NewVal > pFloat->m_Max)
+						InRange = false;
+				}
+				if(InRange && absolute(NewVal - State.m_LastValue) > 0.000001f)
+				{
+					if(absolute(NewVal - *pFloat->m_pVariable) < 0.000001f)
+						s_StagedFloats.erase(pVar);
+					else
+						s_StagedFloats[pVar] = {NewVal};
+					State.m_LastValue = NewVal;
+				}
 			}
 		}
 		else if(pVar->m_Type == SConfigVariable::VAR_COLOR)

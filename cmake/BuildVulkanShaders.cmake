@@ -159,6 +159,10 @@ if(NOT FOUND_MATCHING_SHA256_FILE)
   generate_shader_file("-DTW_QUAD_TEXTURED" "-DTW_QUAD_GROUPED" "${PROJECT_SOURCE_DIR}/data/shader/vulkan/quad.frag" "data/shader/vulkan/quad_grouped_textured.frag.spv")
   generate_shader_file("-DTW_QUAD_TEXTURED" "-DTW_QUAD_GROUPED" "${PROJECT_SOURCE_DIR}/data/shader/vulkan/quad.vert" "data/shader/vulkan/quad_grouped_textured.vert.spv")
 
+  # Astral UI SDF primitives
+  generate_shader_file("" "" "${PROJECT_SOURCE_DIR}/data/shader/vulkan/sdf_rect.frag" "data/shader/vulkan/sdf_rect.frag.spv")
+  generate_shader_file("" "" "${PROJECT_SOURCE_DIR}/data/shader/vulkan/sdf_rect.vert" "data/shader/vulkan/sdf_rect.vert.spv")
+
   execute_process(${GLSLANG_VALIDATOR_COMMAND_LIST} RESULT_VARIABLE STATUS)
   if(STATUS AND NOT STATUS EQUAL 0)
     message(FATAL_ERROR "${GLSLANG_VALIDATOR_COMMAND_LIST} failed")

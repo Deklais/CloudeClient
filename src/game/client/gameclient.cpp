@@ -3,6 +3,7 @@
 
 #include "gameclient.h"
 
+#include "cloude_input.h"
 #include "components/background.h"
 #include "components/binds.h"
 #include "components/broadcast.h"
@@ -61,6 +62,8 @@
 #include <engine/serverbrowser.h>
 #include <engine/shared/config.h>
 #include <engine/shared/csv.h>
+#include <engine/shared/http.h>
+#include <engine/shared/json.h>
 #include <engine/sound.h>
 #include <engine/storage.h>
 #include <engine/textrender.h>
@@ -122,6 +125,7 @@ void CGameClient::OnConsoleInit()
 					      &m_MapImages,
 					      &m_Effects, // doesn't render anything, just updates effects
 					      &m_SkinProfiles, // TClient
+					      &m_AledCounter, // TClient
 					      &m_Binds,
 					      &m_Binds.m_SpecialBinds,
 					      &m_Controls,
@@ -135,6 +139,7 @@ void CGameClient::OnConsoleInit()
 					      &m_Censor,
 					      &m_Background, // render instead of m_MapLayersBackground when g_Config.m_ClOverlayEntities == 100
 					      &m_MapLayersBackground, // first to render
+					      &m_RainOverlay, // Cloude background rain
 					      &m_BgDraw, // TClient
 					      &m_Particles.m_RenderTrail,
 					      &m_Particles.m_RenderTrailExtra,
@@ -144,10 +149,10 @@ void CGameClient::OnConsoleInit()
 					      &m_Ghost,
 					      &m_TClient, // TClient (Must be before chat and players)
 					      &m_Players,
-						  &m_MovingTilesBackground, // TClient
-						  &m_MapLayersForeground,
-						  &m_MovingTilesForeground, // TClient
-					      &m_Outlines,  // TClient
+					      &m_MovingTilesBackground, // TClient
+					      &m_MapLayersForeground,
+					      &m_MovingTilesForeground, // TClient
+					      &m_Outlines, // TClient
 					      &m_Mumble, // TClient
 					      &m_Pet, // TClient
 					      &m_Particles.m_RenderExplosions,
@@ -166,6 +171,7 @@ void CGameClient::OnConsoleInit()
 					      &m_BindWheel, // TClient
 					      &m_WarList, // TClient
 					      &m_StatusBar, // TClient
+					      &m_MediaIsland, // TClient
 					      &m_InfoMessages,
 					      &m_Chat,
 					      &m_Broadcast,
@@ -193,6 +199,7 @@ void CGameClient::OnConsoleInit()
 						  &m_BindWheel, // TClient
 						  &m_Emoticon,
 						  &m_ImportantAlert,
+						  &m_MediaIsland, // TClient HUD editor
 						  &m_Menus,
 						  &m_Controls,
 						  &m_TouchControls,
@@ -534,6 +541,137 @@ void CGameClient::OnUpdate()
 	}
 }
 
+static bool CloudeDevPresenceEndpoint(char *pBuf, int BufSize, const char *pPath)
+{
+	if(g_Config.m_TcCloudeDevPresenceUrl[0] == '\0')
+		return false;
+
+	const int UrlLen = str_length(g_Config.m_TcCloudeDevPresenceUrl);
+	const bool HasSlash = UrlLen > 0 && g_Config.m_TcCloudeDevPresenceUrl[UrlLen - 1] == '/';
+	str_format(pBuf, BufSize, "%s%s%s", g_Config.m_TcCloudeDevPresenceUrl, HasSlash ? "" : "/", pPath);
+	return true;
+}
+
+void CGameClient::StartCloudeDevPresenceHeartbeat(const char *pServerAddress, int ClientId)
+{
+	char aUrl[300];
+	if(!CloudeDevPresenceEndpoint(aUrl, sizeof(aUrl), "heartbeat"))
+		return;
+
+	char aServer[NETADDR_MAXSTRSIZE * 2];
+	char aToken[256];
+	EscapeJson(aServer, sizeof(aServer), pServerAddress);
+	EscapeJson(aToken, sizeof(aToken), g_Config.m_TcCloudeDevPresenceToken);
+
+	char aJson[512];
+	str_format(aJson, sizeof(aJson), "{\"token\":\"%s\",\"server\":\"%s\",\"client_id\":%d}", aToken, aServer, ClientId);
+	m_pCloudeDevHeartbeatRequest = HttpPostJson(aUrl, aJson);
+	m_pCloudeDevHeartbeatRequest->LogProgress(HTTPLOG::NONE);
+	m_pCloudeDevHeartbeatRequest->HeaderString("X-Cloude-Dev-Token", g_Config.m_TcCloudeDevPresenceToken);
+	m_pCloudeDevHeartbeatRequest->Timeout(CTimeout{2000, 5000, 0, 0});
+	Http()->Run(m_pCloudeDevHeartbeatRequest);
+}
+
+void CGameClient::StartCloudeDevPresenceList(const char *pServerAddress)
+{
+	char aUrl[300];
+	if(!CloudeDevPresenceEndpoint(aUrl, sizeof(aUrl), "list"))
+		return;
+
+	char aServer[NETADDR_MAXSTRSIZE * 2];
+	EscapeJson(aServer, sizeof(aServer), pServerAddress);
+
+	char aJson[256];
+	str_format(aJson, sizeof(aJson), "{\"server\":\"%s\"}", aServer);
+	m_pCloudeDevListRequest = HttpPostJson(aUrl, aJson);
+	m_pCloudeDevListRequest->LogProgress(HTTPLOG::NONE);
+	m_pCloudeDevListRequest->Timeout(CTimeout{2000, 5000, 0, 0});
+	Http()->Run(m_pCloudeDevListRequest);
+}
+
+void CGameClient::FinishCloudeDevPresenceList()
+{
+	if(!m_pCloudeDevListRequest || m_pCloudeDevListRequest->State() == EHttpState::QUEUED || m_pCloudeDevListRequest->State() == EHttpState::RUNNING)
+		return;
+
+	std::shared_ptr<CHttpRequest> pRequest = m_pCloudeDevListRequest;
+	m_pCloudeDevListRequest = nullptr;
+
+	if(pRequest->State() != EHttpState::DONE || pRequest->StatusCode() != 200)
+		return;
+
+	json_value *pJson = pRequest->ResultJson();
+	if(!pJson || pJson->type != json_object)
+	{
+		json_value_free(pJson);
+		return;
+	}
+
+	for(auto &ClientData : m_aClients)
+		ClientData.m_CloudeDevBadgeRemote = false;
+
+	const json_value *pDevs = json_object_get(pJson, "devs");
+	if(pDevs->type == json_array)
+	{
+		for(int i = 0; i < json_array_length(pDevs); ++i)
+		{
+			const json_value *pEntry = json_array_get(pDevs, i);
+			const json_value *pClientId = pEntry;
+			if(pEntry->type == json_object)
+				pClientId = json_object_get(pEntry, "client_id");
+			if(pClientId->type != json_integer)
+				continue;
+
+			const int ClientId = (int)pClientId->u.integer;
+			if(in_range(ClientId, MAX_CLIENTS - 1) && m_Snap.m_apPlayerInfos[ClientId])
+				m_aClients[ClientId].m_CloudeDevBadgeRemote = true;
+		}
+	}
+
+	json_value_free(pJson);
+}
+
+void CGameClient::UpdateCloudeDevPresence()
+{
+	FinishCloudeDevPresenceList();
+
+	if(m_pCloudeDevHeartbeatRequest && m_pCloudeDevHeartbeatRequest->State() != EHttpState::QUEUED && m_pCloudeDevHeartbeatRequest->State() != EHttpState::RUNNING)
+		m_pCloudeDevHeartbeatRequest = nullptr;
+
+	if(Client()->State() != IClient::STATE_ONLINE || g_Config.m_TcCloudeDevPresenceUrl[0] == '\0')
+	{
+		m_aCloudeDevPresenceServer[0] = '\0';
+		for(auto &ClientData : m_aClients)
+			ClientData.m_CloudeDevBadgeRemote = false;
+		return;
+	}
+
+	char aServerAddress[NETADDR_MAXSTRSIZE];
+	net_addr_str(&Client()->ServerAddress(), aServerAddress, sizeof(aServerAddress), true);
+	if(str_comp(m_aCloudeDevPresenceServer, aServerAddress) != 0)
+	{
+		str_copy(m_aCloudeDevPresenceServer, aServerAddress);
+		m_CloudeDevNextHeartbeat = 0;
+		m_CloudeDevNextListRequest = 0;
+		for(auto &ClientData : m_aClients)
+			ClientData.m_CloudeDevBadgeRemote = false;
+	}
+
+	const int64_t Now = time_get();
+	const int64_t Freq = time_freq();
+	if(m_Snap.m_LocalClientId >= 0 && m_CloudeDevLoggedIn && g_Config.m_TcCloudeDevPresenceToken[0] != '\0' && !m_pCloudeDevHeartbeatRequest && Now >= m_CloudeDevNextHeartbeat)
+	{
+		StartCloudeDevPresenceHeartbeat(aServerAddress, m_Snap.m_LocalClientId);
+		m_CloudeDevNextHeartbeat = Now + 10 * Freq;
+	}
+
+	if(!m_pCloudeDevListRequest && Now >= m_CloudeDevNextListRequest)
+	{
+		StartCloudeDevPresenceList(aServerAddress);
+		m_CloudeDevNextListRequest = Now + 5 * Freq;
+	}
+}
+
 void CGameClient::OnDummySwap()
 {
 	if(g_Config.m_ClDummyResetOnSwitch)
@@ -706,6 +844,11 @@ void CGameClient::OnReset()
 	m_ReceivedDDNetPlayer = false;
 	m_ReceivedDDNetPlayerFinishTimes = false;
 	m_ReceivedDDNetPlayerFinishTimesMillis = false;
+	m_CloudeDevNextHeartbeat = 0;
+	m_CloudeDevNextListRequest = 0;
+	m_aCloudeDevPresenceServer[0] = '\0';
+	m_pCloudeDevHeartbeatRequest = nullptr;
+	m_pCloudeDevListRequest = nullptr;
 
 	m_Teams.Reset();
 	m_GameWorld.Clear();
@@ -1278,6 +1421,12 @@ void CGameClient::OnMessage(int MsgId, CUnpacker *pUnpacker, int Conn, bool Dumm
 
 void CGameClient::OnStateChange(int NewState, int OldState)
 {
+	if(OldState == IClient::STATE_ONLINE && NewState < IClient::STATE_ONLINE &&
+		m_LocalServer.IsServerRunning() && net_addr_is_local(&Client()->ServerAddress()))
+	{
+		m_LocalServer.KillServer();
+	}
+
 	// reset everything when not already connected (to keep gathered stuff)
 	if(NewState < IClient::STATE_ONLINE)
 		OnReset();
@@ -2108,6 +2257,8 @@ void CGameClient::OnNewSnapshot()
 	if(m_Snap.m_LocalClientId >= 0)
 	{
 		m_aLocalIds[g_Config.m_ClDummy] = m_Snap.m_LocalClientId;
+		if(m_CloudeDevLoggedIn)
+			m_aClients[m_Snap.m_LocalClientId].m_CloudeDevBadge = true;
 
 		CSnapState::CCharacterInfo *pChr = &m_Snap.m_aCharacters[m_Snap.m_LocalClientId];
 		if(pChr->m_Active)
@@ -2526,52 +2677,6 @@ void CGameClient::UpdateEditorIngameMoved()
 	}
 }
 
-// TClient
-bool CGameClient::GetDummyFastInput(CNetObj_PlayerInput &DummyFastInput, const CNetObj_PlayerInput *pDummyInputData, const CCharacter *pDummyChar, int LocalTee, int DummyTee) const
-{
-	if(!PredictDummy() || !pDummyChar)
-		return false;
-
-	if(g_Config.m_ClDummyHammer)
-	{
-		DummyFastInput = m_HammerInput;
-		return true;
-	}
-
-	if(g_Config.m_ClDummyCopyMoves)
-	{
-		DummyFastInput = m_Controls.m_aFastInput[LocalTee];
-		DummyFastInput.m_Fire = m_Controls.m_aFastInput[DummyTee].m_Fire;
-		DummyFastInput.m_WantedWeapon = m_Controls.m_aFastInput[DummyTee].m_WantedWeapon;
-		DummyFastInput.m_NextWeapon = m_Controls.m_aFastInput[DummyTee].m_NextWeapon;
-		DummyFastInput.m_PrevWeapon = m_Controls.m_aFastInput[DummyTee].m_PrevWeapon;
-		if(g_Config.m_ClDummyControl)
-		{
-			const CNetObj_PlayerInput BaseDummyInput = pDummyInputData ? *pDummyInputData : CNetObj_PlayerInput{};
-			DummyFastInput.m_Jump = BaseDummyInput.m_Jump;
-			DummyFastInput.m_Fire = BaseDummyInput.m_Fire;
-			DummyFastInput.m_Hook = BaseDummyInput.m_Hook;
-		}
-		return true;
-	}
-
-	if(g_Config.m_ClDummyControl)
-	{
-		const CNetObj_PlayerInput BaseDummyInput = pDummyInputData ? *pDummyInputData : CNetObj_PlayerInput{};
-		DummyFastInput = BaseDummyInput;
-		DummyFastInput.m_Direction = m_Controls.m_aFastInput[DummyTee].m_Direction;
-		DummyFastInput.m_PlayerFlags = m_Controls.m_aFastInput[DummyTee].m_PlayerFlags;
-		DummyFastInput.m_TargetX = m_Controls.m_aFastInput[DummyTee].m_TargetX;
-		DummyFastInput.m_TargetY = m_Controls.m_aFastInput[DummyTee].m_TargetY;
-		DummyFastInput.m_WantedWeapon = m_Controls.m_aFastInput[DummyTee].m_WantedWeapon;
-		DummyFastInput.m_NextWeapon = m_Controls.m_aFastInput[DummyTee].m_NextWeapon;
-		DummyFastInput.m_PrevWeapon = m_Controls.m_aFastInput[DummyTee].m_PrevWeapon;
-		return true;
-	}
-
-	return false;
-}
-
 void CGameClient::ApplyPreInputs(int Tick, bool Direct, CGameWorld &GameWorld)
 {
 	if(!g_Config.m_ClAntiPingPreInput)
@@ -2645,11 +2750,11 @@ void CGameClient::OnPredict()
 	// init
 	bool Dummy = g_Config.m_ClDummy ^ m_IsDummySwapping;
 
-	// PredictedEvents are only handled in predicted world, so update them here
+	//event
 	m_GameWorld.m_PredictedEvents = m_PredictedWorld.m_PredictedEvents;
 	m_PredictedWorld.CopyWorld(&m_GameWorld);
 
-	// don't predict inactive players, or entities from other teams
+	//no perdict
 	for(int i = 0; i < MAX_CLIENTS; i++)
 		if(CCharacter *pChar = m_PredictedWorld.GetCharacterById(i))
 			if((!m_Snap.m_aCharacters[i].m_Active && pChar->m_SnapTicks > 10) || IsOtherTeam(i))
@@ -2675,9 +2780,7 @@ void CGameClient::OnPredict()
 	bool RealPredTick = false;
 	// predict
 
-	int FastInputTicks = 0;
-	if(g_Config.m_TcFastInput)
-		FastInputTicks = (g_Config.m_TcFastInputAmount + 19) / 20;
+	const int FastInputTicks = CloudeInput::PredictionTicks(this);
 
 	int FinalTickRegular = Client()->PredGameTick(g_Config.m_ClDummy); // The vanilla final tick disregarding fast input
 
@@ -2724,12 +2827,19 @@ void CGameClient::OnPredict()
 		// apply inputs and tick
 		CNetObj_PlayerInput *pInputData = (CNetObj_PlayerInput *)Client()->GetInput(Tick, m_IsDummySwapping);
 		CNetObj_PlayerInput *pDummyInputData = !pDummyChar ? nullptr : (CNetObj_PlayerInput *)Client()->GetInput(Tick, m_IsDummySwapping ^ 1);
+		CNetObj_PlayerInput MixedBestPlusInput{};
 		CNetObj_PlayerInput DummyFastInput{};
 		bool DummyFirst = pInputData && pDummyInputData && pDummyChar->GetCid() < pLocalChar->GetCid();
 
 		if(g_Config.m_TcFastInput && Tick > FinalTickRegular)
 		{
 			pInputData = &m_Controls.m_aFastInput[LocalTee];
+			if(CloudeInput::IsBestPlusMode() && Tick > FinalTickRegular + CloudeInput::AimHookPredictionTicks(this))
+			{
+				MixedBestPlusInput = m_Controls.m_aFastInput[LocalTee];
+				CloudeInput::KeepMovementOnly(MixedBestPlusInput, m_Controls.m_aInputData[LocalTee]);
+				pInputData = &MixedBestPlusInput;
+			}
 			if(GetDummyFastInput(DummyFastInput, pDummyInputData, pDummyChar, LocalTee, DummyTee))
 				pDummyInputData = &DummyFastInput;
 		}
@@ -3395,6 +3505,8 @@ void CGameClient::CClientData::Reset()
 	m_EmoticonIgnore = false;
 	m_Friend = false;
 	m_Foe = false;
+	m_CloudeDevBadge = false;
+	m_CloudeDevBadgeRemote = false;
 
 	m_AuthLevel = AUTHED_NO;
 	m_Afk = false;
@@ -4328,7 +4440,7 @@ void CGameClient::DetectStrongHook()
 
 vec2 CGameClient::GetSmoothPos(int ClientId)
 {
-	const int FastInputTicks = g_Config.m_TcFastInput ? (g_Config.m_TcFastInputAmount + 19) / 20 : 0;
+	const int FastInputTicks = CloudeInput::PredictionTicks(this);
 	vec2 Pos = mix(m_aClients[ClientId].m_PrevPredicted.m_Pos, m_aClients[ClientId].m_Predicted.m_Pos, Client()->PredIntraGameTick(g_Config.m_ClDummy));
 	int64_t Now = time_get();
 	for(int i = 0; i < 2; i++)
@@ -4343,7 +4455,7 @@ vec2 CGameClient::GetSmoothPos(int ClientId)
 			Client()->GetSmoothTick(&SmoothTick, &SmoothIntra, MixAmount);
 
 			if(ClientId != m_Snap.m_LocalClientId && g_Config.m_TcFastInputOthers && FastInputTicks > 0)
-				SmoothTick += FastInputTicks;
+				CloudeInput::ApplyLead(SmoothTick, SmoothIntra, this);
 
 			if(SmoothTick > 0 &&
 				m_aClients[ClientId].m_aPredTick[(SmoothTick - 1) % 200] >= Client()->PrevGameTick(g_Config.m_ClDummy) &&
@@ -4351,35 +4463,6 @@ vec2 CGameClient::GetSmoothPos(int ClientId)
 				Pos[i] = mix(m_aClients[ClientId].m_aPredPos[(SmoothTick - 1) % 200][i], m_aClients[ClientId].m_aPredPos[SmoothTick % 200][i], SmoothIntra);
 		}
 	}
-	return Pos;
-}
-vec2 CGameClient::GetFastInputPos(int ClientId)
-{
-	float PredIntraTick = Client()->PredIntraGameTick(g_Config.m_ClDummy);
-	int PredTick = Client()->PredGameTick(g_Config.m_ClDummy);
-
-	vec2 Pos = mix(m_aClients[ClientId].m_PrevPredicted.m_Pos, m_aClients[ClientId].m_Predicted.m_Pos, PredIntraTick);
-
-	float FastInputIntra = (g_Config.m_TcFastInputAmount % 20) / 20.0f;
-	int FastInputTicks = g_Config.m_TcFastInputAmount / 20;
-
-	float CombinedIntra = PredIntraTick + FastInputIntra;
-
-	float IntraRemainder = 0.0f;
-	float FinalIntra = std::modf(CombinedIntra, &IntraRemainder);
-	int CarryOverTicks = static_cast<int>(IntraRemainder);
-
-	FastInputTicks += CarryOverTicks;
-
-	int FinalTick = PredTick + FastInputTicks;
-
-	if(FinalTick > 0 &&
-		m_aClients[ClientId].m_aPredTick[(FinalTick - 1) % 200] >= Client()->PrevGameTick(g_Config.m_ClDummy) &&
-		m_aClients[ClientId].m_aPredTick[FinalTick % 200] <= Client()->PredGameTick(g_Config.m_ClDummy) + FastInputTicks)
-	{
-		Pos = mix(m_aClients[ClientId].m_aPredPos[(FinalTick - 1) % 200], m_aClients[ClientId].m_aPredPos[FinalTick % 200], FinalIntra);
-	}
-
 	return Pos;
 }
 vec2 CGameClient::GetFreezePos(int ClientId)
@@ -4420,28 +4503,22 @@ vec2 CGameClient::GetFreezePos(int ClientId)
 
 	m_SmoothTick = SmoothTick;
 	m_SmoothIntraTick = SmoothIntra;
-
-	float FastInputIntra = (g_Config.m_TcFastInputAmount % 20) / 20.0f;
-	int FastInputTicks = g_Config.m_TcFastInputAmount / 20;
-
-	float CombinedIntra = SmoothIntra + FastInputIntra;
-
-	float IntraRemainder = 0.0f;
-	float FinalIntra = std::modf(CombinedIntra, &IntraRemainder);
-	int CarryOverTicks = static_cast<int>(IntraRemainder);
-
-	FastInputTicks += CarryOverTicks;
+	float FinalIntra = SmoothIntra;
+	int FastInputTicks = CloudeInput::PredictionTicks(this);
+	CloudeInput::ApplyLead(SmoothTick, FinalIntra, this);
 
 	const bool IsLocal = ClientId == m_Snap.m_LocalClientId || (PredictDummy() && ClientId == m_aLocalIds[!g_Config.m_ClDummy]);
 	if(IsLocal && g_Config.m_TcFastInput)
 	{
-		SmoothTick += FastInputTicks;
 		SmoothIntra = FinalIntra;
 	}
 	else if(!IsLocal && g_Config.m_TcFastInputOthers && g_Config.m_TcFastInput)
 	{
-		SmoothTick += FastInputTicks;
 		SmoothIntra = FinalIntra;
+	}
+	else
+	{
+		Client()->GetSmoothFreezeTick(&SmoothTick, &SmoothIntra, MixAmount);
 	}
 
 	if(SmoothTick > 0 &&

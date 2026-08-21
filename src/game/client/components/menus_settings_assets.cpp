@@ -2,6 +2,10 @@
 
 #include <base/system.h>
 
+#if !defined(CONF_PLATFORM_ANDROID)
+#include <base/process.h>
+#endif
+
 #include <engine/font_icons.h>
 #include <engine/shared/config.h>
 #include <engine/storage.h>
@@ -32,7 +36,8 @@ enum
 	ASSETS_TAB_PARTICLES = 3,
 	ASSETS_TAB_HUD = 4,
 	ASSETS_TAB_EXTRAS = 5,
-	NUMBER_OF_ASSETS_TABS = 6,
+	ASSETS_TAB_SOUNDS = 6,
+	NUMBER_OF_ASSETS_TABS = 7,
 };
 
 void CMenus::LoadEntities(SCustomEntities *pEntitiesItem, void *pUser)
@@ -47,23 +52,33 @@ void CMenus::LoadEntities(SCustomEntities *pEntitiesItem, void *pUser)
 		{
 			str_format(aPath, sizeof(aPath), "editor/entities_clear/%s.png", gs_apModEntitiesNames[i]);
 			pEntitiesItem->m_aImages[i].m_Texture = pThis->Graphics()->LoadTexture(aPath, IStorage::TYPE_ALL);
-			if(!pEntitiesItem->m_RenderTexture.IsValid() || pEntitiesItem->m_RenderTexture.IsNullTexture())
+			if(pEntitiesItem->m_aImages[i].m_Texture.IsValid() && !pEntitiesItem->m_aImages[i].m_Texture.IsNullTexture())
+			{
 				pEntitiesItem->m_RenderTexture = pEntitiesItem->m_aImages[i].m_Texture;
+				break;
+			}
 		}
 	}
 	else
 	{
+		// A single representative texture is enough for the menu preview. The
+		// selected entities pack is loaded separately by CMapImages.
+		str_format(aPath, sizeof(aPath), "assets/entities/%s.png", pEntitiesItem->m_aName);
+		pEntitiesItem->m_aImages[0].m_Texture = pThis->Graphics()->LoadTexture(aPath, IStorage::TYPE_ALL);
+		if(pEntitiesItem->m_aImages[0].m_Texture.IsValid() && !pEntitiesItem->m_aImages[0].m_Texture.IsNullTexture())
+		{
+			pEntitiesItem->m_RenderTexture = pEntitiesItem->m_aImages[0].m_Texture;
+			return;
+		}
 		for(int i = 0; i < MAP_IMAGE_MOD_TYPE_COUNT; ++i)
 		{
 			str_format(aPath, sizeof(aPath), "assets/entities/%s/%s.png", pEntitiesItem->m_aName, gs_apModEntitiesNames[i]);
 			pEntitiesItem->m_aImages[i].m_Texture = pThis->Graphics()->LoadTexture(aPath, IStorage::TYPE_ALL);
-			if(pEntitiesItem->m_aImages[i].m_Texture.IsNullTexture())
+			if(pEntitiesItem->m_aImages[i].m_Texture.IsValid() && !pEntitiesItem->m_aImages[i].m_Texture.IsNullTexture())
 			{
-				str_format(aPath, sizeof(aPath), "assets/entities/%s.png", pEntitiesItem->m_aName);
-				pEntitiesItem->m_aImages[i].m_Texture = pThis->Graphics()->LoadTexture(aPath, IStorage::TYPE_ALL);
-			}
-			if(!pEntitiesItem->m_RenderTexture.IsValid() || pEntitiesItem->m_RenderTexture.IsNullTexture())
 				pEntitiesItem->m_RenderTexture = pEntitiesItem->m_aImages[i].m_Texture;
+				break;
+			}
 		}
 	}
 }
@@ -83,7 +98,6 @@ int CMenus::EntitiesScan(const char *pName, int IsDir, int DirType, void *pUser)
 
 		SCustomEntities EntitiesItem;
 		str_copy(EntitiesItem.m_aName, pName);
-		CMenus::LoadEntities(&EntitiesItem, pUser);
 		pThis->m_vEntitiesList.push_back(EntitiesItem);
 	}
 	else
@@ -98,7 +112,6 @@ int CMenus::EntitiesScan(const char *pName, int IsDir, int DirType, void *pUser)
 
 			SCustomEntities EntitiesItem;
 			str_copy(EntitiesItem.m_aName, aName);
-			CMenus::LoadEntities(&EntitiesItem, pUser);
 			pThis->m_vEntitiesList.push_back(EntitiesItem);
 		}
 	}
@@ -144,7 +157,6 @@ static int AssetScan(const char *pName, int IsDir, int DirType, std::vector<TNam
 
 		TName AssetItem;
 		str_copy(AssetItem.m_aName, pName);
-		LoadAsset(&AssetItem, pAssetName, pGraphics);
 		vAssetList.push_back(AssetItem);
 	}
 	else
@@ -159,7 +171,6 @@ static int AssetScan(const char *pName, int IsDir, int DirType, std::vector<TNam
 
 			TName AssetItem;
 			str_copy(AssetItem.m_aName, aName);
-			LoadAsset(&AssetItem, pAssetName, pGraphics);
 			vAssetList.push_back(AssetItem);
 		}
 	}
@@ -209,12 +220,48 @@ int CMenus::ExtrasScan(const char *pName, int IsDir, int DirType, void *pUser)
 	return AssetScan(pName, IsDir, DirType, pThis->m_vExtrasList, "extras", pGraphics, pUser);
 }
 
+int CMenus::SoundsScan(const char *pName, int IsDir, int DirType, void *pUser)
+{
+	auto *pRealUser = (SMenuAssetScanUser *)pUser;
+	auto *pThis = (CMenus *)pRealUser->m_pUser;
+	if(pName[0] == '.')
+		return 0;
+
+	SCustomSound SoundItem;
+	if(IsDir)
+	{
+		if(str_comp(pName, "default") == 0)
+			return 0;
+		str_copy(SoundItem.m_aName, pName);
+	}
+	else if(str_endswith_nocase(pName, ".zip") != nullptr || str_endswith_nocase(pName, ".rar") != nullptr)
+	{
+		const char *pExtension = str_rchr(pName, '.');
+		if(pExtension == nullptr || pExtension == pName)
+			return 0;
+		str_truncate(SoundItem.m_aName, sizeof(SoundItem.m_aName), pName, pExtension - pName);
+		str_copy(SoundItem.m_aArchiveFilename, pName);
+		SoundItem.m_IsArchive = true;
+	}
+	else
+	{
+		return 0;
+	}
+
+	if(!str_valid_filename(SoundItem.m_aName))
+		return 0;
+	pThis->m_vSoundList.push_back(SoundItem);
+	pRealUser->m_LoadedFunc();
+	return 0;
+}
+
 static std::vector<const CMenus::SCustomEntities *> gs_vpSearchEntitiesList;
 static std::vector<const CMenus::SCustomGame *> gs_vpSearchGamesList;
 static std::vector<const CMenus::SCustomEmoticon *> gs_vpSearchEmoticonsList;
 static std::vector<const CMenus::SCustomParticle *> gs_vpSearchParticlesList;
 static std::vector<const CMenus::SCustomHud *> gs_vpSearchHudList;
 static std::vector<const CMenus::SCustomExtras *> gs_vpSearchExtrasList;
+static std::vector<const CMenus::SCustomSound *> gs_vpSearchSoundsList;
 
 static bool gs_aInitCustomList[NUMBER_OF_ASSETS_TABS] = {
 	true,
@@ -227,6 +274,12 @@ static size_t gs_aCustomListSize[NUMBER_OF_ASSETS_TABS] = {
 static CLineInputBuffered<64> s_aFilterInputs[NUMBER_OF_ASSETS_TABS];
 
 static int s_CurCustomTab = ASSETS_TAB_ENTITIES;
+
+#if defined(CONF_FAMILY_WINDOWS)
+static PROCESS gs_SoundPackExtractProcess = INVALID_PROCESS;
+static char gs_aPendingSoundPack[64];
+static bool gs_SoundPackReadyToActivate = false;
+#endif
 
 static const CMenus::SCustomItem *GetCustomItem(int CurTab, size_t Index)
 {
@@ -242,6 +295,8 @@ static const CMenus::SCustomItem *GetCustomItem(int CurTab, size_t Index)
 		return gs_vpSearchHudList[Index];
 	else if(CurTab == ASSETS_TAB_EXTRAS)
 		return gs_vpSearchExtrasList[Index];
+	else if(CurTab == ASSETS_TAB_SOUNDS)
+		return gs_vpSearchSoundsList[Index];
 	dbg_assert_failed("Invalid CurTab: %d", CurTab);
 }
 
@@ -306,6 +361,10 @@ void CMenus::ClearCustomItems(int CurTab)
 		// reload current DDNet particles skin
 		GameClient()->LoadExtrasSkin(g_Config.m_ClAssetExtras);
 	}
+	else if(CurTab == ASSETS_TAB_SOUNDS)
+	{
+		m_vSoundList.clear();
+	}
 	else
 	{
 		dbg_assert_failed("Invalid CurTab: %d", CurTab);
@@ -320,7 +379,6 @@ static void InitAssetList(std::vector<TName> &vAssetList, const char *pAssetPath
 	{
 		TName AssetItem;
 		str_copy(AssetItem.m_aName, "default");
-		LoadAsset(&AssetItem, pAssetName, pGraphics);
 		vAssetList.push_back(AssetItem);
 
 		// load assets
@@ -353,6 +411,21 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 {
 	CUIRect TabBar, CustomList, QuickSearch, DirectoryButton, ReloadButton;
 
+#if defined(CONF_FAMILY_WINDOWS)
+	if(gs_SoundPackExtractProcess != INVALID_PROCESS && !process_is_alive(gs_SoundPackExtractProcess))
+	{
+		process_kill(gs_SoundPackExtractProcess); // Also closes the process handle.
+		gs_SoundPackExtractProcess = INVALID_PROCESS;
+		gs_SoundPackReadyToActivate = gs_aPendingSoundPack[0] != '\0';
+	}
+	if(gs_SoundPackReadyToActivate && GameClient()->m_Sounds.ReloadSoundPack(gs_aPendingSoundPack))
+	{
+		str_copy(g_Config.m_ClAssetSounds, gs_aPendingSoundPack);
+		gs_SoundPackReadyToActivate = false;
+		gs_aPendingSoundPack[0] = '\0';
+	}
+#endif
+
 	MainView.HSplitTop(20.0f, &TabBar, &MainView);
 	const float TabWidth = TabBar.w / (float)NUMBER_OF_ASSETS_TABS;
 	static CButtonContainer s_aPageTabs[NUMBER_OF_ASSETS_TABS] = {};
@@ -362,7 +435,8 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 		Localize("Emoticons"),
 		Localize("Particles"),
 		Localize("HUD"),
-		Localize("Extras")};
+		Localize("Extras"),
+		Localize("Sounds")};
 
 	for(int Tab = ASSETS_TAB_ENTITIES; Tab < NUMBER_OF_ASSETS_TABS; ++Tab)
 	{
@@ -388,7 +462,6 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 		{
 			SCustomEntities EntitiesItem;
 			str_copy(EntitiesItem.m_aName, "default");
-			LoadEntities(&EntitiesItem, &User);
 			m_vEntitiesList.push_back(EntitiesItem);
 
 			// load entities
@@ -417,6 +490,21 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 	else if(s_CurCustomTab == ASSETS_TAB_EXTRAS)
 	{
 		InitAssetList(m_vExtrasList, "assets/extras", "extras", ExtrasScan, Graphics(), Storage(), &User);
+	}
+	else if(s_CurCustomTab == ASSETS_TAB_SOUNDS)
+	{
+		if(m_vSoundList.empty())
+		{
+			SCustomSound SoundItem;
+			str_copy(SoundItem.m_aName, "default");
+			m_vSoundList.push_back(SoundItem);
+			Storage()->CreateFolder("assets", IStorage::TYPE_SAVE);
+			Storage()->CreateFolder("assets/sounds", IStorage::TYPE_SAVE);
+			Storage()->ListDirectory(IStorage::TYPE_SAVE, "assets/sounds", SoundsScan, &User);
+			std::sort(m_vSoundList.begin(), m_vSoundList.end());
+		}
+		if(m_vSoundList.size() != gs_aCustomListSize[s_CurCustomTab])
+			gs_aInitCustomList[s_CurCustomTab] = true;
 	}
 	else
 	{
@@ -465,6 +553,10 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 		{
 			ListSize = InitSearchList(gs_vpSearchExtrasList, m_vExtrasList);
 		}
+		else if(s_CurCustomTab == ASSETS_TAB_SOUNDS)
+		{
+			ListSize = InitSearchList(gs_vpSearchSoundsList, m_vSoundList);
+		}
 		gs_aInitCustomList[s_CurCustomTab] = false;
 		gs_aCustomListSize[s_CurCustomTab] = ListSize;
 	}
@@ -501,9 +593,17 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 	{
 		SearchListSize = gs_vpSearchExtrasList.size();
 	}
+	else if(s_CurCustomTab == ASSETS_TAB_SOUNDS)
+	{
+		SearchListSize = gs_vpSearchSoundsList.size();
+		TextureHeight = 55;
+	}
 
 	static CListBox s_ListBox;
 	s_ListBox.DoStart(TextureHeight + 15.0f + 10.0f + Margin, SearchListSize, CustomList.w / (Margin + TextureWidth), 1, OldSelected, &CustomList, false);
+	// Limit synchronous PNG decoding and GPU uploads per frame. This keeps the
+	// Assets page responsive even with hundreds of large custom textures.
+	int PreviewLoadsRemaining = 2;
 	for(size_t i = 0; i < SearchListSize; ++i)
 	{
 		const SCustomItem *pItem = GetCustomItem(s_CurCustomTab, i);
@@ -540,12 +640,36 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 			if(str_comp(pItem->m_aName, g_Config.m_ClAssetExtras) == 0)
 				OldSelected = i;
 		}
+		else if(s_CurCustomTab == ASSETS_TAB_SOUNDS)
+		{
+			if(str_comp(pItem->m_aName, g_Config.m_ClAssetSounds) == 0)
+				OldSelected = i;
+		}
 
 		const CListboxItem Item = s_ListBox.DoNextItem(pItem, OldSelected >= 0 && (size_t)OldSelected == i);
 		CUIRect ItemRect = Item.m_Rect;
 		ItemRect.Margin(Margin / 2, &ItemRect);
 		if(!Item.m_Visible)
 			continue;
+
+		if(s_CurCustomTab != ASSETS_TAB_SOUNDS && !pItem->m_PreviewLoadAttempted && PreviewLoadsRemaining > 0)
+		{
+			SCustomItem *pMutableItem = const_cast<SCustomItem *>(pItem);
+			pMutableItem->m_PreviewLoadAttempted = true;
+			if(s_CurCustomTab == ASSETS_TAB_ENTITIES)
+				LoadEntities(static_cast<SCustomEntities *>(pMutableItem), &User);
+			else if(s_CurCustomTab == ASSETS_TAB_GAME)
+				LoadAsset(pMutableItem, "game", Graphics());
+			else if(s_CurCustomTab == ASSETS_TAB_EMOTICONS)
+				LoadAsset(pMutableItem, "emoticons", Graphics());
+			else if(s_CurCustomTab == ASSETS_TAB_PARTICLES)
+				LoadAsset(pMutableItem, "particles", Graphics());
+			else if(s_CurCustomTab == ASSETS_TAB_HUD)
+				LoadAsset(pMutableItem, "hud", Graphics());
+			else if(s_CurCustomTab == ASSETS_TAB_EXTRAS)
+				LoadAsset(pMutableItem, "extras", Graphics());
+			PreviewLoadsRemaining--;
+		}
 
 		CUIRect TextureRect;
 		ItemRect.HSplitTop(15, &ItemRect, &TextureRect);
@@ -562,10 +686,14 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 			Graphics()->QuadsEnd();
 			Graphics()->WrapNormal();
 		}
+		else if(s_CurCustomTab == ASSETS_TAB_SOUNDS)
+		{
+			Ui()->DoLabel(&TextureRect, Localize("Sound pack"), 16.0f, TEXTALIGN_MC);
+		}
 	}
 
 	const int NewSelected = s_ListBox.DoEnd();
-	if(OldSelected != NewSelected)
+	if(OldSelected != NewSelected && NewSelected >= 0 && (size_t)NewSelected < SearchListSize)
 	{
 		if(GetCustomItem(s_CurCustomTab, NewSelected)->m_aName[0] != '\0')
 		{
@@ -598,6 +726,34 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 			{
 				str_copy(g_Config.m_ClAssetExtras, GetCustomItem(s_CurCustomTab, NewSelected)->m_aName);
 				GameClient()->LoadExtrasSkin(g_Config.m_ClAssetExtras);
+			}
+			else if(s_CurCustomTab == ASSETS_TAB_SOUNDS)
+			{
+				const auto *pSoundItem = static_cast<const SCustomSound *>(GetCustomItem(s_CurCustomTab, NewSelected));
+				if(!pSoundItem->m_IsArchive)
+				{
+					if(GameClient()->m_Sounds.ReloadSoundPack(pSoundItem->m_aName))
+						str_copy(g_Config.m_ClAssetSounds, pSoundItem->m_aName);
+				}
+#if defined(CONF_FAMILY_WINDOWS)
+				else if(gs_SoundPackExtractProcess == INVALID_PROCESS)
+				{
+					char aArchiveRelative[IO_MAX_PATH_LENGTH];
+					char aCacheRelative[IO_MAX_PATH_LENGTH];
+					char aArchiveFull[IO_MAX_PATH_LENGTH];
+					char aCacheFull[IO_MAX_PATH_LENGTH];
+					str_format(aArchiveRelative, sizeof(aArchiveRelative), "assets/sounds/%s", pSoundItem->m_aArchiveFilename);
+					str_format(aCacheRelative, sizeof(aCacheRelative), "assets/sounds/.cache/%s", pSoundItem->m_aName);
+					Storage()->CreateFolder("assets/sounds/.cache", IStorage::TYPE_SAVE);
+					Storage()->CreateFolder(aCacheRelative, IStorage::TYPE_SAVE);
+					Storage()->GetCompletePath(IStorage::TYPE_SAVE, aArchiveRelative, aArchiveFull, sizeof(aArchiveFull));
+					Storage()->GetCompletePath(IStorage::TYPE_SAVE, aCacheRelative, aCacheFull, sizeof(aCacheFull));
+					const char *apArguments[] = {"-xf", aArchiveFull, "-C", aCacheFull, "--strip-components=1"};
+					gs_SoundPackExtractProcess = process_execute("tar.exe", EShellExecuteWindowState::HIDDEN, apArguments, std::size(apArguments));
+					if(gs_SoundPackExtractProcess != INVALID_PROCESS)
+						str_copy(gs_aPendingSoundPack, pSoundItem->m_aName);
+				}
+#endif
 			}
 		}
 	}
@@ -632,6 +788,8 @@ void CMenus::RenderSettingsCustom(CUIRect MainView)
 			str_copy(aBufFull, "assets/hud");
 		else if(s_CurCustomTab == ASSETS_TAB_EXTRAS)
 			str_copy(aBufFull, "assets/extras");
+		else if(s_CurCustomTab == ASSETS_TAB_SOUNDS)
+			str_copy(aBufFull, "assets/sounds");
 		Storage()->GetCompletePath(IStorage::TYPE_SAVE, aBufFull, aBuf, sizeof(aBuf));
 		Storage()->CreateFolder("assets", IStorage::TYPE_SAVE);
 		Storage()->CreateFolder(aBufFull, IStorage::TYPE_SAVE);

@@ -1471,6 +1471,7 @@ void CMenus::RenderSettings(CUIRect MainView)
 		Localize("DDNet"),
 		Localize("Assets"),
 		TCLocalize("TClient"),
+		"Cloude",
 		Localize("Profiles"),
 		Localize("Configs")};
 
@@ -1541,6 +1542,11 @@ void CMenus::RenderSettings(CUIRect MainView)
 	{
 		GameClient()->m_MenuBackground.ChangePosition(13);
 		RenderSettingsTClient(MainView);
+	}
+	else if(g_Config.m_UiSettingsPage == SETTINGS_ISLAND_CLIENT)
+	{
+		GameClient()->m_MenuBackground.ChangePosition(13);
+		RenderSettingsTClientIslandClient(MainView);
 	}
 	else if(g_Config.m_UiSettingsPage == SETTINGS_PROFILES)
 	{

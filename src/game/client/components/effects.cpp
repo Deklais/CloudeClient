@@ -325,6 +325,60 @@ void CEffects::Confetti(vec2 Pos, float Alpha)
 	}
 }
 
+void CEffects::AledBurst(vec2 Pos, float Alpha)
+{
+	const ColorRGBA Core(0.72f, 0.95f, 1.0f, 0.95f * Alpha);
+	const ColorRGBA Accent(0.32f, 0.78f, 1.0f, 0.8f * Alpha);
+
+	for(int i = 0; i < 14; i++)
+	{
+		CParticle p;
+		p.SetDefault();
+		p.m_Spr = i % 3 == 0 ? SPRITE_PART_BALL : SPRITE_PART_SLICE;
+		p.m_Pos = Pos + vec2(random_float(-14.0f, 14.0f), random_float(-20.0f, 8.0f));
+		p.m_Vel = direction(-0.5f * pi + random_float(-0.75f, 0.75f)) * random_float(120.0f, 420.0f);
+		p.m_LifeSpan = random_float(0.28f, 0.48f);
+		p.m_StartSize = random_float(10.0f, 20.0f);
+		p.m_EndSize = 0.0f;
+		p.m_UseAlphaFading = true;
+		p.m_StartAlpha = p.m_Color.a;
+		p.m_EndAlpha = 0.0f;
+		p.m_Rot = random_angle();
+		p.m_Rotspeed = random_float(-1.0f, 1.0f) * pi;
+		p.m_Gravity = 420.0f;
+		p.m_Friction = 0.74f;
+		p.m_FlowAffected = 0.0f;
+		p.m_Collides = false;
+		p.m_Color = (i % 2 == 0 ? Core : Accent).Multiply(random_float(0.85f, 1.15f));
+		p.m_StartAlpha = p.m_Color.a;
+		GameClient()->m_Particles.Add(CParticles::GROUP_GENERAL, &p);
+	}
+
+	for(int i = 0; i < 8; i++)
+	{
+		CParticle p;
+		p.SetDefault();
+		const vec2 Dir = direction(i / 8.0f * 2.0f * pi);
+		p.m_Spr = SPRITE_PART_SLICE;
+		p.m_Pos = Pos + Dir * 10.0f;
+		p.m_Vel = Dir * random_float(80.0f, 170.0f);
+		p.m_LifeSpan = random_float(0.2f, 0.34f);
+		p.m_StartSize = random_float(7.0f, 12.0f);
+		p.m_EndSize = 0.0f;
+		p.m_UseAlphaFading = true;
+		p.m_StartAlpha = 0.75f * Alpha;
+		p.m_EndAlpha = 0.0f;
+		p.m_Rot = random_angle();
+		p.m_Rotspeed = random_float(-1.0f, 1.0f) * pi;
+		p.m_Gravity = 120.0f;
+		p.m_Friction = 0.7f;
+		p.m_FlowAffected = 0.0f;
+		p.m_Collides = false;
+		p.m_Color = ColorRGBA(1.0f, 1.0f, 1.0f, 0.75f * Alpha);
+		GameClient()->m_Particles.Add(CParticles::GROUP_GENERAL, &p);
+	}
+}
+
 void CEffects::Explosion(vec2 Pos, float Alpha)
 {
 	// add to flow

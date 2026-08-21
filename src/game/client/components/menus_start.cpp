@@ -2,7 +2,11 @@
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "menus_start.h"
 
+#include <base/math.h>
+#include <base/str.h>
+
 #include <engine/client/updater.h>
+#include <engine/config.h>
 #include <engine/font_icons.h>
 #include <engine/graphics.h>
 #include <engine/keys.h>
@@ -17,13 +21,95 @@
 #include <game/localization.h>
 #include <game/version.h>
 
+#include <cstdlib>
+
 #if defined(CONF_PLATFORM_ANDROID)
 #include <android/android_main.h>
 #endif
 
+namespace
+{
+	bool s_PlayAloneNameActive = false;
+	bool s_PlayAloneNameCallbackRegistered = false;
+	bool s_PlayAloneOriginalNameCaptured = false;
+	char s_aPlayAloneOriginalName[sizeof(g_Config.m_PlayerName)] = "";
+
+	void WriteEscapedConfigString(char *pDst, int DstSize, const char *pCommand, const char *pValue)
+	{
+		const int PrefixLen = str_format(pDst, DstSize, "%s \"", pCommand);
+		if(PrefixLen < 0 || PrefixLen >= DstSize)
+			return;
+		char *pWrite = pDst + PrefixLen;
+		str_escape(&pWrite, pValue, pDst + DstSize - 2);
+		*pWrite++ = '"';
+		*pWrite = '\0';
+	}
+
+	void PlayAloneConfigSaveCallback(IConfigManager *pConfigManager, void *pUserData)
+	{
+		if(!s_PlayAloneNameActive || !s_PlayAloneOriginalNameCaptured)
+			return;
+
+		char aLine[128];
+		WriteEscapedConfigString(aLine, sizeof(aLine), "player_name", s_aPlayAloneOriginalName);
+		pConfigManager->WriteLine(aLine);
+	}
+
+	int RandomDigitInt(int MaxExclusive)
+	{
+		return rand() % MaxExclusive;
+	}
+
+	void GeneratePlayAloneName(char *pBuf, int Size)
+	{
+		// Random pronounceable word (up to 5 letters) by alternating consonants and
+		// vowels, instead of the old digits-only name.
+		static const char s_aConsonants[] = "bcdfghjklmnprstvwz";
+		static const char s_aVowels[] = "aeiou";
+		const int Length = 3 + RandomDigitInt(3); // 3..5 letters
+		int Written = 0;
+		bool Consonant = RandomDigitInt(2) == 0;
+		for(int i = 0; i < Length && Written < Size - 1; ++i)
+		{
+			char Char;
+			if(Consonant)
+				Char = s_aConsonants[RandomDigitInt((int)sizeof(s_aConsonants) - 1)];
+			else
+				Char = s_aVowels[RandomDigitInt((int)sizeof(s_aVowels) - 1)];
+			if(Written == 0 && Char >= 'a' && Char <= 'z')
+				Char -= 32; // capitalize first letter
+			pBuf[Written++] = Char;
+			Consonant = !Consonant;
+		}
+		pBuf[Written] = '\0';
+	}
+
+	void UseNormalPlayName()
+	{
+		if(s_PlayAloneNameActive && s_PlayAloneOriginalNameCaptured)
+			str_copy(g_Config.m_PlayerName, s_aPlayAloneOriginalName);
+		else
+			g_Config.m_PlayerName[0] = '\0';
+
+		s_PlayAloneNameActive = false;
+		s_PlayAloneOriginalNameCaptured = false;
+		s_aPlayAloneOriginalName[0] = '\0';
+	}
+
+	int StartBrowserPage()
+	{
+		return g_Config.m_UiPage >= CMenus::PAGE_INTERNET && g_Config.m_UiPage <= CMenus::PAGE_FAVORITE_COMMUNITY_5 ? g_Config.m_UiPage : CMenus::PAGE_INTERNET;
+	}
+}
+
 void CMenusStart::RenderStartMenu(CUIRect MainView)
 {
 	GameClient()->m_MenuBackground.ChangePosition(CMenuBackground::POS_START);
+	if(!s_PlayAloneNameCallbackRegistered)
+	{
+		ConfigManager()->RegisterCallback(PlayAloneConfigSaveCallback, nullptr);
+		s_PlayAloneNameCallbackRegistered = true;
+	}
 
 	// render logo
 	Graphics()->TextureSet(g_pData->m_aImages[IMAGE_BANNER].m_Id);
@@ -38,113 +124,168 @@ void CMenusStart::RenderStartMenu(CUIRect MainView)
 
 	CUIRect Button;
 	int NewPage = -1;
+	static bool s_ShowPlayChoice = false;
 
-	CUIRect ExtMenu;
-	MainView.VSplitLeft(30.0f, nullptr, &ExtMenu);
-	ExtMenu.VSplitLeft(100.0f, &ExtMenu, nullptr);
-
-	ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
-	static CButtonContainer s_DiscordButton;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_DiscordButton, Localize("Discord"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)))
+	if(!s_ShowPlayChoice)
 	{
-		Client()->ViewLink(Localize("https://ddnet.org/discord"));
-	}
+		CUIRect ExtMenu;
+		MainView.VSplitLeft(30.0f, nullptr, &ExtMenu);
+		ExtMenu.VSplitLeft(100.0f, &ExtMenu, nullptr);
 
-	ExtMenu.HSplitBottom(5.0f, &ExtMenu, nullptr); // little space
-	ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
-	static CButtonContainer s_LearnButton;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_LearnButton, Localize("Learn"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)))
-	{
-		Client()->ViewLink(Localize("https://wiki.ddnet.org/"));
-	}
-
-	ExtMenu.HSplitBottom(5.0f, &ExtMenu, nullptr); // little space
-	ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
-	static CButtonContainer s_TutorialButton;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_TutorialButton, Localize("Tutorial"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)))
-	{
-		GameClient()->m_Menus.JoinTutorial();
-	}
-
-	ExtMenu.HSplitBottom(5.0f, &ExtMenu, nullptr); // little space
-	ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
-	static CButtonContainer s_WebsiteButton;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_WebsiteButton, Localize("Website"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)))
-	{
-		Client()->ViewLink("https://ddnet.org/");
-	}
-
-	ExtMenu.HSplitBottom(5.0f, &ExtMenu, nullptr); // little space
-	ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
-	static CButtonContainer s_NewsButton;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_NewsButton, Localize("News"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, g_Config.m_UiUnreadNews ? ColorRGBA(0.0f, 1.0f, 0.0f, 0.25f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || CheckHotKey(KEY_N))
-		NewPage = CMenus::PAGE_NEWS;
-
-	CUIRect Menu;
-	MainView.VMargin(VMargin, &Menu);
-	Menu.HSplitBottom(25.0f, &Menu, nullptr);
-
-	Menu.HSplitBottom(40.0f, &Menu, &Button);
-	static CButtonContainer s_QuitButton;
-	bool UsedEscape = false;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_QuitButton, Localize("Quit"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || (UsedEscape = Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE)) || CheckHotKey(KEY_Q))
-	{
-		if(UsedEscape || GameClient()->Editor()->HasUnsavedData() || (GameClient()->CurrentRaceTime() / 60 >= g_Config.m_ClConfirmQuitTime && g_Config.m_ClConfirmQuitTime >= 0))
+		ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
+		static CButtonContainer s_DiscordButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_DiscordButton, Localize("Discord"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)))
 		{
-			GameClient()->m_Menus.ShowQuitPopup();
+			Client()->ViewLink(Localize("https://ddnet.org/discord"));
 		}
-		else
+
+		ExtMenu.HSplitBottom(5.0f, &ExtMenu, nullptr); // little space
+		ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
+		static CButtonContainer s_LearnButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_LearnButton, Localize("Learn"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)))
 		{
-			Client()->Quit();
+			Client()->ViewLink(Localize("https://wiki.ddnet.org/"));
 		}
-	}
 
-	Menu.HSplitBottom(100.0f, &Menu, nullptr);
-	Menu.HSplitBottom(40.0f, &Menu, &Button);
-	static CButtonContainer s_SettingsButton;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_SettingsButton, Localize("Settings"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "settings" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || CheckHotKey(KEY_S))
-		NewPage = CMenus::PAGE_SETTINGS;
-
-	Menu.HSplitBottom(5.0f, &Menu, nullptr); // little space
-	Menu.HSplitBottom(40.0f, &Menu, &Button);
-	static CButtonContainer s_LocalServerButton;
-
-	const bool LocalServerRunning = GameClient()->m_LocalServer.IsServerRunning();
-	if(GameClient()->m_Menus.DoButton_Menu(&s_LocalServerButton, LocalServerRunning ? Localize("Stop server") : Localize("Run server"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "local_server" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, LocalServerRunning ? ColorRGBA(0.0f, 1.0f, 0.0f, 0.25f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || (CheckHotKey(KEY_R) && Input()->KeyPress(KEY_R)))
-	{
-		if(LocalServerRunning)
+		ExtMenu.HSplitBottom(5.0f, &ExtMenu, nullptr); // little space
+		ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
+		static CButtonContainer s_TutorialButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_TutorialButton, Localize("Tutorial"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)))
 		{
-			GameClient()->m_LocalServer.KillServer();
+			GameClient()->m_Menus.JoinTutorial();
 		}
-		else
+
+		ExtMenu.HSplitBottom(5.0f, &ExtMenu, nullptr); // little space
+		ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
+		static CButtonContainer s_WebsiteButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_WebsiteButton, Localize("Website"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)))
 		{
-			GameClient()->m_LocalServer.RunServer({});
+			Client()->ViewLink("https://ddnet.org/");
+		}
+
+		ExtMenu.HSplitBottom(5.0f, &ExtMenu, nullptr); // little space
+		ExtMenu.HSplitBottom(20.0f, &ExtMenu, &Button);
+		static CButtonContainer s_NewsButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_NewsButton, Localize("News"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, g_Config.m_UiUnreadNews ? ColorRGBA(0.0f, 1.0f, 0.0f, 0.25f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || CheckHotKey(KEY_N))
+			NewPage = CMenus::PAGE_NEWS;
+
+		CUIRect Menu;
+		MainView.VMargin(VMargin, &Menu);
+		Menu.HSplitBottom(25.0f, &Menu, nullptr);
+
+		Menu.HSplitBottom(40.0f, &Menu, &Button);
+		static CButtonContainer s_QuitButton;
+		bool UsedEscape = false;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_QuitButton, Localize("Quit"), 0, &Button, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || (UsedEscape = Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE)) || CheckHotKey(KEY_Q))
+		{
+			if(UsedEscape || GameClient()->Editor()->HasUnsavedData() || (GameClient()->CurrentRaceTime() / 60 >= g_Config.m_ClConfirmQuitTime && g_Config.m_ClConfirmQuitTime >= 0))
+			{
+				GameClient()->m_Menus.ShowQuitPopup();
+			}
+			else
+			{
+				Client()->Quit();
+			}
+		}
+
+		Menu.HSplitBottom(100.0f, &Menu, nullptr);
+		Menu.HSplitBottom(40.0f, &Menu, &Button);
+		static CButtonContainer s_SettingsButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_SettingsButton, Localize("Settings"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "settings" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || CheckHotKey(KEY_S))
+			NewPage = CMenus::PAGE_SETTINGS;
+
+		Menu.HSplitBottom(5.0f, &Menu, nullptr); // little space
+		Menu.HSplitBottom(40.0f, &Menu, &Button);
+		static CButtonContainer s_LocalServerButton;
+
+		const bool LocalServerRunning = GameClient()->m_LocalServer.IsServerRunning();
+		if(GameClient()->m_Menus.DoButton_Menu(&s_LocalServerButton, LocalServerRunning ? Localize("Stop server") : Localize("Run server"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "local_server" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, LocalServerRunning ? ColorRGBA(0.0f, 1.0f, 0.0f, 0.25f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || (CheckHotKey(KEY_R) && Input()->KeyPress(KEY_R)))
+		{
+			if(LocalServerRunning)
+			{
+				GameClient()->m_LocalServer.KillServer();
+			}
+			else
+			{
+				GameClient()->m_LocalServer.RunServer({});
+			}
+		}
+
+		Menu.HSplitBottom(5.0f, &Menu, nullptr); // little space
+		Menu.HSplitBottom(40.0f, &Menu, &Button);
+		static CButtonContainer s_MapEditorButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_MapEditorButton, Localize("Editor"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "editor" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, GameClient()->Editor()->HasUnsavedData() ? ColorRGBA(0.0f, 1.0f, 0.0f, 0.25f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || CheckHotKey(KEY_E))
+		{
+			g_Config.m_ClEditor = 1;
+			Input()->MouseModeRelative();
+		}
+
+		Menu.HSplitBottom(5.0f, &Menu, nullptr); // little space
+		Menu.HSplitBottom(40.0f, &Menu, &Button);
+		static CButtonContainer s_DemoButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_DemoButton, Localize("Demos"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "demos" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || CheckHotKey(KEY_D))
+		{
+			NewPage = CMenus::PAGE_DEMOS;
+		}
+
+		Menu.HSplitBottom(5.0f, &Menu, nullptr); // little space
+		Menu.HSplitBottom(40.0f, &Menu, &Button);
+		static CButtonContainer s_PlayButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_PlayButton, Localize("Play", "Start menu"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "play_game" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || Ui()->ConsumeHotkey(CUi::HOTKEY_ENTER) || CheckHotKey(KEY_P))
+		{
+			if(g_Config.m_TcPlayModeChoice)
+				s_ShowPlayChoice = true;
+			else
+				NewPage = StartBrowserPage();
 		}
 	}
-
-	Menu.HSplitBottom(5.0f, &Menu, nullptr); // little space
-	Menu.HSplitBottom(40.0f, &Menu, &Button);
-	static CButtonContainer s_MapEditorButton;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_MapEditorButton, Localize("Editor"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "editor" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, GameClient()->Editor()->HasUnsavedData() ? ColorRGBA(0.0f, 1.0f, 0.0f, 0.25f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || CheckHotKey(KEY_E))
+	else
 	{
-		g_Config.m_ClEditor = 1;
-		Input()->MouseModeRelative();
-	}
+		CUIRect ChoiceMenu;
+		MainView.VMargin(VMargin, &ChoiceMenu);
+		ChoiceMenu.HSplitTop(205.0f, nullptr, &ChoiceMenu);
+		ChoiceMenu.HSplitTop(232.0f, &ChoiceMenu, nullptr);
+		ChoiceMenu.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.22f), IGraphics::CORNER_ALL, Rounding);
 
-	Menu.HSplitBottom(5.0f, &Menu, nullptr); // little space
-	Menu.HSplitBottom(40.0f, &Menu, &Button);
-	static CButtonContainer s_DemoButton;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_DemoButton, Localize("Demos"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "demos" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || CheckHotKey(KEY_D))
-	{
-		NewPage = CMenus::PAGE_DEMOS;
-	}
+		CUIRect ChoiceHeader, ChoiceBody, ChoiceButton;
+		ChoiceMenu.Margin(14.0f, &ChoiceMenu);
+		ChoiceMenu.HSplitTop(34.0f, &ChoiceHeader, &ChoiceBody);
+		Ui()->DoLabel(&ChoiceHeader, "Выбор режима", 20.0f, TEXTALIGN_MC);
 
-	Menu.HSplitBottom(5.0f, &Menu, nullptr); // little space
-	Menu.HSplitBottom(40.0f, &Menu, &Button);
-	static CButtonContainer s_PlayButton;
-	if(GameClient()->m_Menus.DoButton_Menu(&s_PlayButton, Localize("Play", "Start menu"), 0, &Button, BUTTONFLAG_LEFT, g_Config.m_ClShowStartMenuImages ? "play_game" : nullptr, IGraphics::CORNER_ALL, Rounding, 0.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f)) || Ui()->ConsumeHotkey(CUi::HOTKEY_ENTER) || CheckHotKey(KEY_P))
-	{
-		NewPage = g_Config.m_UiPage >= CMenus::PAGE_INTERNET && g_Config.m_UiPage <= CMenus::PAGE_FAVORITE_COMMUNITY_5 ? g_Config.m_UiPage : CMenus::PAGE_INTERNET;
+		ChoiceBody.HSplitTop(10.0f, nullptr, &ChoiceBody);
+		ChoiceBody.HSplitTop(54.0f, &ChoiceButton, &ChoiceBody);
+		static CButtonContainer s_PlayNormalButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_PlayNormalButton, "Играть обычно", 0, &ChoiceButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, Rounding, 0.2f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.28f)))
+		{
+			UseNormalPlayName();
+			s_ShowPlayChoice = false;
+			NewPage = StartBrowserPage();
+		}
+
+		ChoiceBody.HSplitTop(8.0f, nullptr, &ChoiceBody);
+		ChoiceBody.HSplitTop(54.0f, &ChoiceButton, &ChoiceBody);
+		static CButtonContainer s_PlayAloneButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_PlayAloneButton, "Играть одному", 0, &ChoiceButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, Rounding, 0.2f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.28f)))
+		{
+			if(!s_PlayAloneNameActive)
+			{
+				str_copy(s_aPlayAloneOriginalName, g_Config.m_PlayerName);
+				s_PlayAloneOriginalNameCaptured = true;
+			}
+
+			GeneratePlayAloneName(g_Config.m_PlayerName, sizeof(g_Config.m_PlayerName));
+			s_PlayAloneNameActive = true;
+			s_ShowPlayChoice = false;
+			NewPage = StartBrowserPage();
+		}
+
+		ChoiceBody.HSplitTop(12.0f, nullptr, &ChoiceBody);
+		ChoiceBody.HSplitTop(40.0f, &ChoiceButton, &ChoiceBody);
+		static CButtonContainer s_PlayChoiceBackButton;
+		if(GameClient()->m_Menus.DoButton_Menu(&s_PlayChoiceBackButton, Localize("Back"), 0, &ChoiceButton, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, Rounding, 0.2f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.16f)) || Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
+		{
+			s_ShowPlayChoice = false;
+		}
 	}
 
 	// render version

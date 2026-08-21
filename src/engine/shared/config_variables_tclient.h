@@ -3,6 +3,7 @@
 #ifndef MACRO_CONFIG_INT
 #error "The config macros must be defined"
 #define MACRO_CONFIG_INT(Tcme, ScriptName, Def, Min, Max, Save, Desc) ;
+#define MACRO_CONFIG_FLT(Tcme, ScriptName, Def, Min, Max, Save, Desc) ;
 #define MACRO_CONFIG_COL(Tcme, ScriptName, Def, Save, Desc) ;
 #define MACRO_CONFIG_STR(Tcme, ScriptName, Len, Def, Save, Desc) ;
 #endif
@@ -58,8 +59,20 @@ MACRO_CONFIG_INT(TcShowCenterWidth, tc_show_center_width, 0, 0, 20, CFGFLAG_CLIE
 MACRO_CONFIG_COL(TcShowCenterColor, tc_show_center_color, 1694498688, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_COLALPHA, "Center lines color (enabled by tc_show_center)") // transparent red
 
 MACRO_CONFIG_INT(TcFastInput, tc_fast_input, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Uses input for prediction before the next tick")
-MACRO_CONFIG_INT(TcFastInputAmount, tc_fast_input_amount, 20, 1, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "How many milliseconds fast input will apply")
+MACRO_CONFIG_INT(TcFastInputMode, tc_fast_input_mode, 0, 0, 3, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Fast input mode (0 = Tater, 1 = Saiko, 2 = Cloude, 3 = Cloude+)")
+MACRO_CONFIG_INT(TcFastInputAmount, tc_fast_input_amount, 20, 1, 60, CFGFLAG_CLIENT | CFGFLAG_SAVE, "How many milliseconds fast input will apply")
+MACRO_CONFIG_FLT(TcFastInputSaikoAmount, tc_fast_input_saiko_amount, 1.0f, 0.0f, 3.0f, CFGFLAG_CLIENT | CFGFLAG_SAVE, "How much fast input Saiko mode will apply")
+MACRO_CONFIG_INT(TcFastInputBestAmount, tc_fast_input_best_amount, 20, 1, 60, CFGFLAG_CLIENT | CFGFLAG_SAVE, "How many milliseconds Cloude will apply")
+MACRO_CONFIG_INT(TcFastInputBestPlusAggression, tc_fast_input_bestplus_aggression, 60, 0, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "How aggressively Cloude+ follows ping")
+MACRO_CONFIG_INT(TcFastInputBestPlusMovement, tc_fast_input_bestplus_movement, 32, 14, 60, CFGFLAG_CLIENT | CFGFLAG_SAVE, "How many milliseconds Cloude+ will apply to movement")
+MACRO_CONFIG_INT(TcFastInputBestPlusAimHook, tc_fast_input_bestplus_aimhook, 28, 14, 60, CFGFLAG_CLIENT | CFGFLAG_SAVE, "How many milliseconds Cloude+ will apply to aim and hook")
+MACRO_CONFIG_INT(TcFastInputBestPlusDynamicBoost, tc_fast_input_bestplus_dynamic_boost, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Temporarily boosts fast input after fresh movement and hook inputs")
 MACRO_CONFIG_INT(TcFastInputOthers, tc_fast_input_others, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Apply fast input to other tees")
+MACRO_CONFIG_INT(TcMicroDirectionAssist, tc_micro_direction_assist, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Keep the last direction when left and right overlap")
+MACRO_CONFIG_INT(TcHookTimingBuffer, tc_hook_timing_buffer, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Keeps hook intent for a very short time after release")
+MACRO_CONFIG_INT(TcJumpBuffer, tc_jump_buffer, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Keeps jump intent for a very short time after release")
+MACRO_CONFIG_INT(TcIgnoreTag, tc_ignore_tag, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Ignore chat mentions until you are safe")
+MACRO_CONFIG_INT(TcFocusMode, tc_focus_mode, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Hide public chat noise while your race timer is running")
 
 MACRO_CONFIG_INT(TcAntiPingImproved, tc_antiping_improved, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Different antiping smoothing algorithm, not compatible with cl_antiping_smooth")
 MACRO_CONFIG_INT(TcAntiPingNegativeBuffer, tc_antiping_negative_buffer, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Helps in Gores. Allows internal certainty value to be negative which causes more conservative prediction")
@@ -277,6 +290,36 @@ MACRO_CONFIG_INT(TcUiShowDDNet, tc_ui_show_ddnet, 0, 0, 1, CFGFLAG_CLIENT | CFGF
 MACRO_CONFIG_INT(TcUiShowTClient, tc_ui_show_tclient, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show TClient domain in Configs tab")
 MACRO_CONFIG_INT(TcUiOnlyModified, tc_ui_only_modified, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show only modified settings in Configs tab")
 MACRO_CONFIG_INT(TcUiCompactList, tc_ui_compact_list, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Use compact row layout in Configs tab")
+
+// Island HUD editor
+MACRO_CONFIG_INT(TcPlayModeChoice, tc_play_mode_choice, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show play mode choice menu before opening the server browser")
+MACRO_CONFIG_INT(TcAledCounter, tc_aled_counter, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Enable local Aled counter")
+MACRO_CONFIG_INT(TcAledAutoRecord, tc_aled_auto_record, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Automatically save short replay demos when an Aled is counted")
+MACRO_CONFIG_INT(TcAledRecordNotify, tc_aled_record_notify, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show a notification when an Aled replay demo is saved")
+MACRO_CONFIG_INT(TcInputDoctor, tc_input_doctor, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show a compact input diagnostics HUD")
+MACRO_CONFIG_INT(TcMotionBlur, tc_motion_blur, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Enable Cloude motion blur")
+MACRO_CONFIG_INT(TcMotionBlurStrength, tc_motion_blur_strength, 35, 0, 95, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Full-screen previous-frame blend strength")
+MACRO_CONFIG_INT(TcTeamNameGradient, tc_team_name_gradient, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Use team-colored gradients for nameplates")
+MACRO_CONFIG_INT(TcChatGifPreview, tc_chat_gif_preview, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show animated GIF previews below chat messages")
+MACRO_CONFIG_INT(TcRainVisual, tc_rain_visual, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Enable Cloude rain visual")
+MACRO_CONFIG_INT(TcRainAmount, tc_rain_amount, 55, 5, 200, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Cloude rain amount")
+MACRO_CONFIG_INT(TcRainStrength, tc_rain_strength, 65, 1, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Cloude rain opacity and length strength")
+MACRO_CONFIG_INT(TcRainSpeed, tc_rain_speed, 120, 20, 300, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Cloude rain animation speed")
+MACRO_CONFIG_INT(TcAutoFire, tc_auto_fire, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Repeat fire while the fire button is held")
+MACRO_CONFIG_INT(TcAutoFireSpeed, tc_auto_fire_speed, 10, 1, 25, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Auto fire speed in clicks per second")
+MACRO_CONFIG_INT(TcAutoSwapGunHammer, tc_auto_swap_gun_hammer, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Switch from gun to hammer when firing")
+MACRO_CONFIG_INT(TcAutoSwapReturnGun, tc_auto_swap_return_gun, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Switch back to gun after auto swapping to hammer")
+MACRO_CONFIG_STR(TcCloudeDevPresenceUrl, tc_cloude_dev_presence_url, 256, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Cloude dev presence endpoint (disabled)")
+MACRO_CONFIG_STR(TcCloudeDevPresenceToken, tc_cloude_dev_presence_token, 128, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Cloude dev presence token (disabled)")
+MACRO_CONFIG_INT(TcHudEditor, tc_hud_editor, 0, 0, 1, CFGFLAG_CLIENT, "Enable in-game HUD editor")
+MACRO_CONFIG_INT(TcMediaIsland, tc_media_island, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show the Cloude media island")
+MACRO_CONFIG_INT(TcHudIslandX, tc_hud_island_x, 500, 0, 1000, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Media island horizontal position in permille")
+MACRO_CONFIG_INT(TcHudIslandY, tc_hud_island_y, 33, 0, 1000, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Media island vertical position in permille")
+MACRO_CONFIG_INT(TcHudIslandScale, tc_hud_island_scale, 90, 50, 160, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Media island scale")
+MACRO_CONFIG_INT(TcMediaIslandAnimSpeed, tc_media_island_anim_speed, 100, 0, 300, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Media island animation speed percent (0 = instant, 100 = default)")
+MACRO_CONFIG_INT(TcHudVoteX, tc_hud_vote_x, 0, 0, 1000, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Vote HUD horizontal position in permille")
+MACRO_CONFIG_INT(TcHudVoteY, tc_hud_vote_y, 200, 0, 1000, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Vote HUD vertical position in permille")
+MACRO_CONFIG_INT(TcCloudeLanguage, tc_cloude_language, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Cloude settings language, 0 English, 1 Russian")
 
 // Dummy Info
 MACRO_CONFIG_INT(TcShowhudDummyPosition, tc_showhud_dummy_position, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show ingame HUD (Dummy Position)")

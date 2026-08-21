@@ -207,6 +207,8 @@ public:
 	virtual void DemoRecorder_Start(const char *pFilename, bool WithTimestamp, int Recorder) = 0;
 	virtual void DemoRecorder_HandleAutoStart() = 0;
 	virtual void DemoRecorder_UpdateReplayRecorder() = 0;
+	virtual void DemoRecorder_SaveReplay(int Length, const char *pFilename = "", const char *pFolder = "demos/replays", bool RequireReplayConfig = true) = 0;
+	virtual void DemoRecorder_SaveReplayRaw(const char *pFilename, const char *pFolder) = 0;
 	virtual class IDemoRecorder *DemoRecorder(int Recorder) = 0;
 	virtual void AutoScreenshot_Start() = 0;
 	virtual void AutoStatScreenshot_Start() = 0;

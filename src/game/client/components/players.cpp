@@ -5,6 +5,7 @@
 
 #include <base/color.h>
 #include <base/math.h>
+#include <base/system.h>
 
 #include <engine/client/enums.h>
 #include <engine/demo.h>
@@ -563,7 +564,8 @@ void CPlayers::RenderPlayer(
 	const CNetObj_Character *pPlayerChar,
 	const CTeeRenderInfo *pRenderInfo,
 	int ClientId,
-	float Intra)
+	float Intra,
+	float AlphaScale)
 {
 	CNetObj_Character Prev;
 	CNetObj_Character Player;
@@ -590,6 +592,9 @@ void CPlayers::RenderPlayer(
 
 	if(ClientId == -2) // ghost
 		Alpha = g_Config.m_ClRaceGhostAlpha / 100.0f;
+	Alpha *= AlphaScale;
+	if(Alpha <= 0.001f)
+		return;
 	// TODO: snd_game_volume_others
 	const float Volume = 1.0f;
 
@@ -1479,6 +1484,94 @@ void CPlayers::RenderPlayerGhost(
 			Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
 			Graphics()->QuadsSetRotation(0);
 		}
+	}
+}
+
+void CPlayers::RenderMotionBlurTrail(
+	const CNetObj_Character *pPrevChar,
+	const CNetObj_Character *pPlayerChar,
+	const CTeeRenderInfo *pRenderInfo,
+	int ClientId)
+{
+	if(!g_Config.m_TcMotionBlur || g_Config.m_TcMotionBlurStrength <= 0 || ClientId < 0)
+	{
+		if(ClientId >= 0 && ClientId < MAX_CLIENTS)
+			m_aMotionBlurHistory[ClientId].clear();
+		return;
+	}
+	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
+		return;
+	if(GameClient()->m_Snap.m_SpecInfo.m_Active &&
+		GameClient()->m_Snap.m_SpecInfo.m_SpectatorId != SPEC_FREEVIEW &&
+		ClientId != GameClient()->m_Snap.m_SpecInfo.m_SpectatorId)
+		return;
+
+	const vec2 CurPos = GameClient()->m_aClients[ClientId].m_RenderPos;
+	const int64_t Now = time_get();
+	const int64_t Frequency = time_freq();
+	const float Strength = std::clamp(g_Config.m_TcMotionBlurStrength / 100.0f, 0.01f, 5.0f);
+	const float MaxAgeSeconds = std::clamp(0.075f + Strength * 0.034f, 0.075f, 0.245f);
+	const int64_t MaxAge = maximum<int64_t>(1, round_to_int(MaxAgeSeconds * Frequency));
+	auto &History = m_aMotionBlurHistory[ClientId];
+
+	// Teleports and stale/reused client slots must never leave a streak across
+	// the map or carry an old player's silhouette into a new spawn.
+	if(!History.empty() && (distance(History.back().m_Position, CurPos) > 96.0f || Now - History.back().m_Time > MaxAge * 2))
+		History.clear();
+	while(!History.empty() && Now - History.front().m_Time > MaxAge)
+		History.pop_front();
+
+	const int64_t SampleInterval = maximum<int64_t>(1, Frequency / 90);
+	if(History.empty() || (Now - History.back().m_Time >= SampleInterval && distance(History.back().m_Position, CurPos) >= 0.75f))
+	{
+		CNetObj_Character Character = *pPlayerChar;
+		Character.m_X = round_to_int(CurPos.x);
+		Character.m_Y = round_to_int(CurPos.y);
+		History.push_back({CurPos, Character, Now});
+		while(History.size() > 24)
+			History.pop_front();
+	}
+
+	if(History.size() < 2)
+		return;
+	const float TravelDistance = distance(History.front().m_Position, CurPos);
+	const float TravelSeconds = maximum(0.001f, (Now - History.front().m_Time) / (float)Frequency);
+	const float Speed = TravelDistance / TravelSeconds;
+	const float SpeedAmount = std::clamp((Speed - 45.0f) / 620.0f, 0.0f, 1.0f);
+	if(SpeedAmount <= 0.001f)
+		return;
+
+	// At most five full tee silhouettes are drawn, even at 500% strength.
+	// Samples are spread over real time, so the trail is frame-rate independent.
+	const int TrailCount = std::clamp(2 + round_to_int(Strength * 0.55f + SpeedAmount), 2, 5);
+	const float BaseAlpha = std::clamp(0.07f + Strength * 0.018f + SpeedAmount * 0.055f, 0.07f, 0.205f);
+	int LastIndex = -1;
+	for(int Trail = TrailCount; Trail >= 1; --Trail)
+	{
+		const int64_t TargetAge = MaxAge * Trail / (TrailCount + 1);
+		int BestIndex = -1;
+		int64_t BestDifference = MaxAge + 1;
+		for(int Index = 0; Index < (int)History.size(); ++Index)
+		{
+			const int64_t Age = Now - History[Index].m_Time;
+			const int64_t Difference = std::abs(Age - TargetAge);
+			if(Difference < BestDifference)
+			{
+				BestDifference = Difference;
+				BestIndex = Index;
+			}
+		}
+		if(BestIndex < 0 || BestIndex == LastIndex)
+			continue;
+		LastIndex = BestIndex;
+		const SMotionBlurSample &Sample = History[BestIndex];
+		const float AgeRatio = std::clamp((Now - Sample.m_Time) / (float)MaxAge, 0.0f, 1.0f);
+		const float Fade = 1.0f - AgeRatio;
+		const float Alpha = BaseAlpha * Fade * Fade * SpeedAmount;
+		if(Alpha < 0.008f)
+			continue;
+		CNetObj_Character TrailCharacter = Sample.m_Character;
+		RenderPlayer(&TrailCharacter, &TrailCharacter, pRenderInfo, -1, 0.0f, Alpha);
 	}
 }
 inline bool CPlayers::IsPlayerInfoAvailable(int ClientId) const

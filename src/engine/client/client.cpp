@@ -607,10 +607,6 @@ void CClient::GenerateTimeoutCodes(const NETADDR *pAddrs, int NumAddrs)
 		for(int i = 0; i < 2; i++)
 		{
 			GenerateTimeoutCode(m_aTimeoutCodes[i], sizeof(m_aTimeoutCodes[i]), g_Config.m_ClTimeoutSeed, pAddrs, NumAddrs, i);
-
-			char aBuf[64];
-			str_format(aBuf, sizeof(aBuf), "timeout code '%s' (%s)", m_aTimeoutCodes[i], i == 0 ? "normal" : "dummy");
-			m_pConsole->Print(IConsole::OUTPUT_LEVEL_ADDINFO, "client", aBuf);
 		}
 	}
 	else
@@ -632,10 +628,6 @@ void CClient::Connect(const char *pAddress, const char *pPassword)
 
 	if(pAddress != m_aConnectAddressStr)
 		str_copy(m_aConnectAddressStr, pAddress);
-
-	char aMsg[512];
-	str_format(aMsg, sizeof(aMsg), "connecting to '%s'", m_aConnectAddressStr);
-	m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "client", aMsg, CLIENT_NETWORK_PRINT_COLOR);
 
 	int NumConnectAddrs = 0;
 	NETADDR aConnectAddrs[MAX_SERVER_ADDRESSES];
@@ -764,6 +756,8 @@ void CClient::DisconnectWithReason(const char *pReason)
 	m_UseTempRconCommands = 0;
 	m_ExpectedRconCommands = -1;
 	m_GotRconCommands = 0;
+	m_RconCommandCacheLoaded = false;
+	m_vPendingRconCommands.clear();
 	m_pConsole->DeregisterTempAll();
 	m_ExpectedMaplistEntries = -1;
 	m_vMaplistEntries.clear();
@@ -1705,7 +1699,6 @@ void CClient::ProcessServerPacket(CNetChunk *pPacket, int Conn, bool Dummy)
 
 			if(LoadMapSearch(pMap, MapSha256, MapCrc) == nullptr)
 			{
-				m_pConsole->Print(IConsole::OUTPUT_LEVEL_ADDINFO, "client/network", "loading done");
 				SetLoadingStateDetail(IClient::LOADING_STATE_DETAIL_SENDING_READY);
 				SendReady(CONN_MAIN);
 			}
@@ -1977,8 +1970,15 @@ void CClient::ProcessServerPacket(CNetChunk *pPacket, int Conn, bool Dummy)
 			const char *pParams = Unpacker.GetString(CUnpacker::SANITIZE_CC);
 			if(!Unpacker.Error())
 			{
+				m_pConsole->DeregisterTemp(pName);
 				m_pConsole->RegisterTemp(pName, pParams, CFGFLAG_SERVER, pHelp);
-				GameClient()->ForceUpdateConsoleRemoteCompletionSuggestions();
+				auto It = std::find_if(m_vPendingRconCommands.begin(), m_vPendingRconCommands.end(), [&](const SRconCommandCacheEntry &Entry) { return Entry.m_Name == pName; });
+				if(It == m_vPendingRconCommands.end())
+					m_vPendingRconCommands.push_back({pName, pHelp, pParams});
+				else
+					*It = {pName, pHelp, pParams};
+				if(!m_RconCommandCacheLoaded)
+					GameClient()->ForceUpdateConsoleRemoteCompletionSuggestions();
 			}
 			m_GotRconCommands++;
 		}
@@ -1988,6 +1988,8 @@ void CClient::ProcessServerPacket(CNetChunk *pPacket, int Conn, bool Dummy)
 			if(!Unpacker.Error())
 			{
 				m_pConsole->DeregisterTemp(pName);
+				m_vPendingRconCommands.erase(std::remove_if(m_vPendingRconCommands.begin(), m_vPendingRconCommands.end(), [&](const SRconCommandCacheEntry &Entry) { return Entry.m_Name == pName; }), m_vPendingRconCommands.end());
+				m_vRconCommandCache.erase(std::remove_if(m_vRconCommandCache.begin(), m_vRconCommandCache.end(), [&](const SRconCommandCacheEntry &Entry) { return Entry.m_Name == pName; }), m_vRconCommandCache.end());
 				GameClient()->ForceUpdateConsoleRemoteCompletionSuggestions();
 			}
 		}
@@ -2016,6 +2018,20 @@ void CClient::ProcessServerPacket(CNetChunk *pPacket, int Conn, bool Dummy)
 					m_vMaplistEntries.clear();
 					GameClient()->ForceUpdateConsoleRemoteCompletionSuggestions();
 					m_ExpectedMaplistEntries = -1;
+				}
+				else if(m_UseTempRconCommands != 0 && m_aRconAuthed[CONN_MAIN])
+				{
+					char aAddress[NETADDR_MAXSTRSIZE];
+					net_addr_str(&ServerAddress(), aAddress, sizeof(aAddress), true);
+					const unsigned AuthHash = str_quickhash(m_aRconPassword);
+					if(!m_vRconCommandCache.empty() && str_comp(aAddress, m_aRconCommandCacheAddress) == 0 && AuthHash == m_RconCommandCacheAuthHash)
+					{
+						m_pConsole->DeregisterTempAll();
+						for(const auto &Entry : m_vRconCommandCache)
+							m_pConsole->RegisterTemp(Entry.m_Name.c_str(), Entry.m_Params.c_str(), CFGFLAG_SERVER, Entry.m_Help.c_str());
+						m_RconCommandCacheLoaded = true;
+						GameClient()->ForceUpdateConsoleRemoteCompletionSuggestions();
+					}
 				}
 			}
 		}
@@ -2338,9 +2354,17 @@ void CClient::ProcessServerPacket(CNetChunk *pPacket, int Conn, bool Dummy)
 
 			m_ExpectedRconCommands = ExpectedRconCommands;
 			m_GotRconCommands = 0;
+			m_vPendingRconCommands.clear();
 		}
 		else if(Conn == CONN_MAIN && (pPacket->m_Flags & NET_CHUNKFLAG_VITAL) != 0 && Msg == NETMSG_RCON_CMD_GROUP_END)
 		{
+			m_vRconCommandCache = m_vPendingRconCommands;
+			net_addr_str(&ServerAddress(), m_aRconCommandCacheAddress, sizeof(m_aRconCommandCacheAddress), true);
+			m_RconCommandCacheAuthHash = str_quickhash(m_aRconPassword);
+			m_vPendingRconCommands.clear();
+			if(m_RconCommandCacheLoaded)
+				GameClient()->ForceUpdateConsoleRemoteCompletionSuggestions();
+			m_RconCommandCacheLoaded = false;
 			m_ExpectedRconCommands = -1;
 		}
 		else if(Conn == CONN_MAIN && (pPacket->m_Flags & NET_CHUNKFLAG_VITAL) != 0 && Msg == NETMSG_MAPLIST_ADD)
@@ -2662,7 +2686,6 @@ void CClient::PumpNetwork()
 		if(State() == IClient::STATE_CONNECTING && m_aNetClient[CONN_MAIN].State() == NETSTATE_ONLINE)
 		{
 			// we switched to online
-			m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "client", "connected, sending info", CLIENT_NETWORK_PRINT_COLOR);
 			SetState(IClient::STATE_LOADING);
 			SetLoadingStateDetail(IClient::LOADING_STATE_DETAIL_INITIAL);
 			SendInfo(CONN_MAIN);
@@ -3954,7 +3977,53 @@ void CClient::Con_SaveReplay(IConsole::IResult *pResult, void *pUserData)
 
 void CClient::SaveReplay(const int Length, const char *pFilename)
 {
-	if(!g_Config.m_ClReplays)
+	DemoRecorder_SaveReplay(Length, pFilename, "demos/replays", true);
+}
+
+void CClient::DemoRecorder_SaveReplayRaw(const char *pFilename, const char *pFolder)
+{
+	if(State() != IClient::STATE_ONLINE || !GameClient()->Map()->IsLoaded())
+		return;
+
+	if(!DemoRecorder(RECORDER_REPLAYS)->IsRecording())
+	{
+		m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "replay", "ERROR: demorecorder isn't recording. Try to rejoin to fix that.");
+		return;
+	}
+
+	char aFilename[IO_MAX_PATH_LENGTH];
+	str_format(aFilename, sizeof(aFilename), "%s/%s.demo", pFolder, pFilename);
+	IOHANDLE Handle = m_pStorage->OpenFile(aFilename, IOFLAG_WRITE, IStorage::TYPE_SAVE);
+	if(!Handle)
+	{
+		m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "replay", "ERROR: invalid filename. Try a different one!");
+		return;
+	}
+	io_close(Handle);
+	m_pStorage->RemoveFile(aFilename, IStorage::TYPE_SAVE);
+
+	if(DemoRecorder(RECORDER_REPLAYS)->Stop(IDemoRecorder::EStopMode::KEEP_FILE, aFilename) != 0)
+	{
+		m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "replay", "ERROR: failed to save replay file.");
+		DemoRecorder_UpdateReplayRecorder();
+		return;
+	}
+
+	m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "replay", "Saved replay.");
+	if(g_Config.m_TcAledRecordNotify)
+	{
+		GameClient()->Echo("Aled replay saved.");
+		Notify("Cloude", "Aled replay saved");
+	}
+	DemoRecorder_UpdateReplayRecorder();
+}
+
+void CClient::DemoRecorder_SaveReplay(const int Length, const char *pFilename, const char *pFolder, bool RequireReplayConfig)
+{
+	if(State() != IClient::STATE_ONLINE || !GameClient()->Map()->IsLoaded())
+		return;
+
+	if(RequireReplayConfig && !g_Config.m_ClReplays)
 	{
 		m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "replay", "Feature is disabled. Please enable it via configuration.");
 		GameClient()->Echo(Localize("Replay feature is disabled!"));
@@ -3976,11 +4045,11 @@ void CClient::SaveReplay(const int Length, const char *pFilename)
 		{
 			char aTimestamp[20];
 			str_timestamp(aTimestamp, sizeof(aTimestamp));
-			str_format(aFilename, sizeof(aFilename), "demos/replays/%s_%s_(replay).demo", GameClient()->Map()->BaseName(), aTimestamp);
+			str_format(aFilename, sizeof(aFilename), "%s/%s_%s_(replay).demo", pFolder, GameClient()->Map()->BaseName(), aTimestamp);
 		}
 		else
 		{
-			str_format(aFilename, sizeof(aFilename), "demos/replays/%s.demo", pFilename);
+			str_format(aFilename, sizeof(aFilename), "%s/%s.demo", pFolder, pFilename);
 			IOHANDLE Handle = m_pStorage->OpenFile(aFilename, IOFLAG_WRITE, IStorage::TYPE_SAVE);
 			if(!Handle)
 			{
@@ -3991,18 +4060,30 @@ void CClient::SaveReplay(const int Length, const char *pFilename)
 			m_pStorage->RemoveFile(aFilename, IStorage::TYPE_SAVE);
 		}
 
-		// Stop the recorder to correctly slice the demo after
-		DemoRecorder(RECORDER_REPLAYS)->Stop(IDemoRecorder::EStopMode::KEEP_FILE);
+		char aSourceFilename[IO_MAX_PATH_LENGTH];
+		str_copy(aSourceFilename, m_aDemoRecorder[RECORDER_REPLAYS].CurrentFilename());
+		if(aSourceFilename[0] == '\0' || !m_pStorage->FileExists(aSourceFilename, IStorage::TYPE_SAVE))
+		{
+			m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "replay", "ERROR: replay source file is not ready yet.");
+			return;
+		}
 
 		// Slice the demo to get only the last cl_replay_length seconds
-		const char *pSrc = m_aDemoRecorder[RECORDER_REPLAYS].CurrentFilename();
 		const int EndTick = GameTick(g_Config.m_ClDummy);
 		const int StartTick = EndTick - Length * GameTickSpeed();
 
 		m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "replay", "Saving replay...");
 
+		// Stop the recorder to correctly slice the demo after.
+		if(DemoRecorder(RECORDER_REPLAYS)->Stop(IDemoRecorder::EStopMode::KEEP_FILE) != 0 || !m_pStorage->FileExists(aSourceFilename, IStorage::TYPE_SAVE))
+		{
+			m_pConsole->Print(IConsole::OUTPUT_LEVEL_STANDARD, "replay", "ERROR: failed to close replay source file.");
+			DemoRecorder_UpdateReplayRecorder();
+			return;
+		}
+
 		// Create a job to do this slicing in background because it can be a bit long depending on the file size
-		std::shared_ptr<CDemoEdit> pDemoEditTask = std::make_shared<CDemoEdit>(GameClient()->NetVersion(), &m_SnapshotDelta, m_pStorage, pSrc, aFilename, StartTick, EndTick);
+		std::shared_ptr<CDemoEdit> pDemoEditTask = std::make_shared<CDemoEdit>(GameClient()->NetVersion(), &m_SnapshotDelta, m_pStorage, aSourceFilename, aFilename, StartTick, EndTick);
 		Engine()->AddJob(pDemoEditTask);
 		m_EditJobs.push_back(pDemoEditTask);
 
@@ -4192,12 +4273,16 @@ void CClient::DemoRecorder_HandleAutoStart()
 
 void CClient::DemoRecorder_UpdateReplayRecorder()
 {
-	if(!g_Config.m_ClReplays && DemoRecorder(RECORDER_REPLAYS)->IsRecording())
+	const bool KeepReplayRecorder = g_Config.m_ClReplays || g_Config.m_TcAledAutoRecord;
+	if(!KeepReplayRecorder && DemoRecorder(RECORDER_REPLAYS)->IsRecording())
 	{
 		DemoRecorder(RECORDER_REPLAYS)->Stop(IDemoRecorder::EStopMode::REMOVE_FILE);
 	}
 
-	if(g_Config.m_ClReplays && !DemoRecorder(RECORDER_REPLAYS)->IsRecording())
+	if(State() != IClient::STATE_ONLINE || !GameClient()->Map()->IsLoaded())
+		return;
+
+	if(KeepReplayRecorder && !DemoRecorder(RECORDER_REPLAYS)->IsRecording())
 	{
 		char aFilename[IO_MAX_PATH_LENGTH];
 		str_format(aFilename, sizeof(aFilename), "replays/replay_tmp_%s", GameClient()->Map()->BaseName());

@@ -31,7 +31,7 @@ C_HEADER_SET = {
 	"wchar",
 	"wctype",
 }
-C_HEADER_INCLUDE_PATTERN = re.compile(fr"#include\s+<({"|".join(C_HEADER_SET)})\.h>")
+C_HEADER_INCLUDE_PATTERN = re.compile(fr"#include\s+<({'|'.join(C_HEADER_SET)})\.h>")
 
 
 def get_cpp_header(c_header : str):

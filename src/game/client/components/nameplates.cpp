@@ -30,11 +30,15 @@ public:
 	bool m_Local; // TClient
 	bool m_InGame;
 	ColorRGBA m_Color;
+	bool m_TeamGradient = false;
+	ColorRGBA m_GradientStart = ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f);
+	ColorRGBA m_GradientEnd = ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f);
 	bool m_ShowName;
 	char m_aName[std::max<size_t>(MAX_NAME_LENGTH, protocol7::MAX_NAME_ARRAY_SIZE)];
 	bool m_ShowFriendMark;
 	bool m_ShowClientId;
 	int m_ClientId;
+	bool m_ShowDevBadge;
 	float m_FontSizeClientId;
 	bool m_ClientIdSeparateLine;
 	float m_FontSize;
@@ -345,6 +349,9 @@ class CNamePlatePartName : public CNamePlatePartText
 private:
 	char m_aText[std::max<size_t>(MAX_NAME_LENGTH, protocol7::MAX_NAME_ARRAY_SIZE)] = "";
 	float m_FontSize = -INFINITY;
+	bool m_TeamGradient = false;
+	ColorRGBA m_GradientStart = ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f);
+	ColorRGBA m_GradientEnd = ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f);
 
 protected:
 	bool UpdateNeeded(CGameClient &This, const CNamePlateData &Data) override
@@ -352,7 +359,7 @@ protected:
 		m_Visible = Data.m_ShowName;
 		if(!m_Visible)
 			return false;
-		m_Color = Data.m_Color;
+		m_Color = Data.m_TeamGradient ? ColorRGBA(1.0f, 1.0f, 1.0f, Data.m_Color.a) : Data.m_Color;
 		// TClient
 		if(g_Config.m_TcWarList)
 		{
@@ -361,20 +368,128 @@ protected:
 			else if(This.m_WarList.GetWarData(Data.m_ClientId).m_WarClan)
 				m_Color = This.m_WarList.GetClanColor(Data.m_ClientId).WithAlpha(Data.m_Color.a);
 		}
-		return m_FontSize != Data.m_FontSize || str_comp(m_aText, Data.m_aName) != 0;
+		const auto ColorChanged = [](const ColorRGBA &A, const ColorRGBA &B) {
+			return A.r != B.r || A.g != B.g || A.b != B.b || A.a != B.a;
+		};
+		return m_FontSize != Data.m_FontSize || str_comp(m_aText, Data.m_aName) != 0 ||
+		       m_TeamGradient != Data.m_TeamGradient || ColorChanged(m_GradientStart, Data.m_GradientStart) || ColorChanged(m_GradientEnd, Data.m_GradientEnd);
 	}
 	void UpdateText(CGameClient &This, const CNamePlateData &Data) override
 	{
 		m_FontSize = Data.m_FontSize;
 		str_copy(m_aText, Data.m_aName, sizeof(m_aText));
+		m_TeamGradient = Data.m_TeamGradient;
+		m_GradientStart = Data.m_GradientStart;
+		m_GradientEnd = Data.m_GradientEnd;
 		CTextCursor Cursor;
 		Cursor.m_FontSize = m_FontSize;
+		if(m_TeamGradient)
+		{
+			std::vector<int> vOffsets;
+			for(int Offset = 0; m_aText[Offset] != '\0'; Offset = str_utf8_forward(m_aText, Offset))
+				vOffsets.push_back(Offset);
+			vOffsets.push_back(str_length(m_aText));
+			const int GlyphCount = maximum(1, (int)vOffsets.size() - 1);
+			for(int i = 0; i < GlyphCount; ++i)
+			{
+				const float Amount = GlyphCount > 1 ? i / (float)(GlyphCount - 1) : 0.5f;
+				const ColorRGBA Color(
+					mix(m_GradientStart.r, m_GradientEnd.r, Amount),
+					mix(m_GradientStart.g, m_GradientEnd.g, Amount),
+					mix(m_GradientStart.b, m_GradientEnd.b, Amount), 1.0f);
+				Cursor.m_vColorSplits.emplace_back(vOffsets[i], vOffsets[i + 1] - vOffsets[i], Color);
+			}
+		}
 		This.TextRender()->CreateOrAppendTextContainer(m_TextContainerIndex, &Cursor, m_aText);
 	}
 
 public:
 	CNamePlatePartName(CGameClient &This) :
 		CNamePlatePartText(This) {}
+};
+
+class CNamePlatePartDevBadge : public CNamePlatePart
+{
+private:
+	STextContainerIndex m_TextContainerIndex;
+	float m_FontSize = -INFINITY;
+	float m_Alpha = 1.0f;
+	bool m_InGame = false;
+	bool m_TextContainerInGame = false;
+
+public:
+	CNamePlatePartDevBadge(CGameClient &This) :
+		CNamePlatePart(This)
+	{
+		m_Padding = vec2(4.0f, DEFAULT_PADDING);
+	}
+
+	void Reset(CGameClient &This) override
+	{
+		This.TextRender()->DeleteTextContainer(m_TextContainerIndex);
+		m_FontSize = -INFINITY;
+		m_TextContainerInGame = false;
+	}
+
+	void Update(CGameClient &This, const CNamePlateData &Data) override
+	{
+		m_Visible = Data.m_ShowDevBadge;
+		m_InGame = Data.m_InGame;
+		if(!m_Visible)
+			return;
+
+		m_Alpha = Data.m_Color.a;
+		const float FontSize = Data.m_FontSize * 0.62f;
+		if(m_TextContainerIndex.Valid() && m_FontSize == FontSize && m_TextContainerInGame == m_InGame)
+			return;
+
+		m_FontSize = FontSize;
+		m_TextContainerInGame = m_InGame;
+		This.TextRender()->DeleteTextContainer(m_TextContainerIndex);
+
+		unsigned int Flags = ETextRenderFlags::TEXT_RENDER_FLAG_NO_FIRST_CHARACTER_X_BEARING | ETextRenderFlags::TEXT_RENDER_FLAG_NO_LAST_CHARACTER_ADVANCE;
+		if(m_InGame)
+			Flags |= ETextRenderFlags::TEXT_RENDER_FLAG_NO_PIXEL_ALIGNMENT;
+		This.TextRender()->SetRenderFlags(Flags);
+
+		if(m_InGame)
+		{
+			float ScreenX0, ScreenY0, ScreenX1, ScreenY1;
+			This.Graphics()->GetScreen(&ScreenX0, &ScreenY0, &ScreenX1, &ScreenY1);
+			This.Graphics()->MapScreenToInterface(This.m_Camera.m_Center.x, This.m_Camera.m_Center.y);
+			CTextCursor Cursor;
+			Cursor.m_FontSize = m_FontSize;
+			This.TextRender()->CreateOrAppendTextContainer(m_TextContainerIndex, &Cursor, "dev");
+			This.Graphics()->MapScreen(ScreenX0, ScreenY0, ScreenX1, ScreenY1);
+		}
+		else
+		{
+			CTextCursor Cursor;
+			Cursor.m_FontSize = m_FontSize;
+			This.TextRender()->CreateOrAppendTextContainer(m_TextContainerIndex, &Cursor, "dev");
+		}
+
+		This.TextRender()->SetRenderFlags(0);
+		const STextBoundingBox Box = This.TextRender()->GetBoundingBoxTextContainer(m_TextContainerIndex);
+		m_Size = vec2(Box.m_W + 10.0f, maximum(Box.m_H + 4.0f, FontSize + 6.0f));
+	}
+
+	void Render(CGameClient &This, vec2 Pos) const override
+	{
+		if(!m_TextContainerIndex.Valid())
+			return;
+
+		CUIRect Badge;
+		Badge.x = Pos.x - m_Size.x / 2.0f;
+		Badge.y = Pos.y - m_Size.y / 2.0f;
+		Badge.w = m_Size.x;
+		Badge.h = m_Size.y;
+		Badge.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.58f * m_Alpha), IGraphics::CORNER_ALL, 5.0f);
+		This.TextRender()->RenderTextContainer(m_TextContainerIndex,
+			ColorRGBA(1.0f, 1.0f, 1.0f, m_Alpha),
+			ColorRGBA(0.0f, 0.0f, 0.0f, 0.35f * m_Alpha),
+			Badge.x + 5.0f, Badge.y + (Badge.h - m_FontSize) * 0.42f);
+	}
 };
 
 class CNamePlatePartClan : public CNamePlatePartText
@@ -728,6 +843,7 @@ private:
 		AddPart<CNamePlatePartIgnoreMark>(This); // TClient
 		AddPart<CNamePlatePartFriendMark>(This);
 		AddPart<CNamePlatePartClientId>(This, false);
+		AddPart<CNamePlatePartDevBadge>(This); // Cloude
 		AddPart<CNamePlatePartName>(This);
 		AddPart<CNamePlatePartNewLine>(This);
 
@@ -867,6 +983,7 @@ void CNamePlates::RenderNamePlateGame(vec2 Position, const CNetObj_PlayerInfo *p
 	Data.m_ShowFriendMark = Data.m_ShowName && g_Config.m_ClNamePlatesFriendMark && GameClient()->m_aClients[pPlayerInfo->m_ClientId].m_Friend;
 	Data.m_ShowClientId = Data.m_ShowName && (g_Config.m_Debug || g_Config.m_ClNamePlatesIds);
 	Data.m_FontSize = 18.0f + 20.0f * g_Config.m_ClNamePlatesSize / 100.0f;
+	Data.m_ShowDevBadge = Data.m_ShowName && (ClientData.m_CloudeDevBadge || ClientData.m_CloudeDevBadgeRemote);
 
 	Data.m_ClientId = pPlayerInfo->m_ClientId;
 	Data.m_ClientIdSeparateLine = g_Config.m_ClNamePlatesIdsSeparateLine;
@@ -902,6 +1019,21 @@ void CNamePlates::RenderNamePlateGame(vec2 Position, const CNetObj_PlayerInfo *p
 		}
 	}
 	Data.m_Color.a = Alpha;
+	Data.m_TeamGradient = g_Config.m_TcTeamNameGradient && g_Config.m_ClNamePlatesTeamcolors &&
+			      (Data.m_Color.r != 1.0f || Data.m_Color.g != 1.0f || Data.m_Color.b != 1.0f);
+	if(Data.m_TeamGradient)
+	{
+		const ColorHSLA Base = color_cast<ColorHSLA>(Data.m_Color);
+		ColorHSLA Start = Base;
+		ColorHSLA End = Base;
+		Start.h = std::fmod(Base.h + 0.94f, 1.0f);
+		Start.l = std::clamp(Base.l + 0.14f, 0.0f, 1.0f);
+		End.h = std::fmod(Base.h + 0.06f, 1.0f);
+		End.s = std::clamp(Base.s + 0.10f, 0.0f, 1.0f);
+		End.l = std::clamp(Base.l - 0.06f, 0.0f, 1.0f);
+		Data.m_GradientStart = color_cast<ColorRGBA>(Start);
+		Data.m_GradientEnd = color_cast<ColorRGBA>(End);
+	}
 
 	int ShowDirectionConfig = g_Config.m_ClShowDirection;
 #if defined(CONF_VIDEORECORDER)

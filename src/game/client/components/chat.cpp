@@ -12,6 +12,8 @@
 #include <engine/keys.h>
 #include <engine/shared/config.h>
 #include <engine/shared/csv.h>
+#include <engine/shared/http.h>
+#include <engine/shared/json.h>
 #include <engine/textrender.h>
 
 #include <generated/protocol.h>
@@ -24,7 +26,20 @@
 #include <game/client/components/sounds.h>
 #include <game/client/components/tclient/colored_parts.h>
 #include <game/client/gameclient.h>
+#include <game/client/prediction/entities/character.h>
+#include <game/collision.h>
 #include <game/localization.h>
+
+#include <cctype>
+#include <string>
+
+#if defined(CONF_FAMILY_WINDOWS)
+#define IStorage IWindowsStorage
+#include <objidl.h>
+#include <wincodec.h>
+#undef IStorage
+#pragma comment(lib, "windowscodecs.lib")
+#endif
 
 char CChat::ms_aDisplayText[MAX_LINE_LENGTH] = "";
 
@@ -46,6 +61,18 @@ void CChat::CLine::Reset(CChat &This)
 	m_TimesRepeated = 0;
 	m_pManagedTeeRenderInfo = nullptr;
 	m_pTranslateResponse = nullptr;
+	if(m_pGifRequest)
+		m_pGifRequest->Abort();
+	m_pGifRequest.reset();
+	for(auto &Frame : m_vGifFrames)
+		This.Graphics()->UnloadTexture(&Frame.m_Texture);
+	m_vGifFrames.clear();
+	m_aGifUrl[0] = '\0';
+	m_GifWidth = 0;
+	m_GifHeight = 0;
+	m_GifStartTime = 0;
+	m_GifResolveDepth = 0;
+	m_GifFailed = false;
 }
 
 CChat::CChat()
@@ -141,6 +168,9 @@ void CChat::Reset()
 	m_pHistoryEntry = nullptr;
 	m_PendingChatCounter = 0;
 	m_LastChatSend = 0;
+	m_IgnoreTagSafeStart = 0;
+	m_IgnoreTagPendingCount = 0;
+	m_aIgnoreTagLastLine[0] = '\0';
 	m_CurrentLine = 0;
 	m_IsInputCensored = false;
 	m_EditingNewLine = true;
@@ -231,6 +261,486 @@ void CChat::Echo(const char *pString)
 	AddLine(CLIENT_MSG, 0, pString);
 }
 
+bool CChat::HandleSkinCommand(const char *pText)
+{
+	static constexpr const char *pCommand = ".skin";
+	const int CommandLength = str_length(pCommand);
+	if(str_comp_nocase_num(pText, pCommand, CommandLength) != 0 ||
+		(pText[CommandLength] != '\0' && pText[CommandLength] != ' '))
+		return false;
+
+	const char *pName = pText + CommandLength;
+	while(*pName == ' ')
+		pName++;
+	char aName[MAX_NAME_LENGTH];
+	str_copy(aName, pName);
+	int Length = str_length(aName);
+	while(Length > 0 && aName[Length - 1] == ' ')
+		aName[--Length] = '\0';
+	if(Length >= 2 && aName[0] == '"' && aName[Length - 1] == '"')
+	{
+		mem_move(aName, aName + 1, Length - 2);
+		aName[Length - 2] = '\0';
+	}
+	if(aName[0] == '\0')
+	{
+		Echo("Использование: .skin \"player\"");
+		return true;
+	}
+
+	int ClientId = -1;
+	for(int i = 0; i < MAX_CLIENTS; ++i)
+	{
+		if(GameClient()->m_aClients[i].m_Active && str_comp_nocase(GameClient()->m_aClients[i].m_aName, aName) == 0)
+		{
+			ClientId = i;
+			break;
+		}
+	}
+	if(ClientId < 0)
+	{
+		char aMessage[128];
+		str_format(aMessage, sizeof(aMessage), "Игрок %s не найден.", aName);
+		Echo(aMessage);
+		return true;
+	}
+
+	const CGameClient::CClientData &ClientData = GameClient()->m_aClients[ClientId];
+	if(g_Config.m_ClDummy)
+	{
+		str_copy(g_Config.m_ClDummySkin, ClientData.m_aSkinName);
+		g_Config.m_ClDummyUseCustomColor = ClientData.m_UseCustomColor;
+		g_Config.m_ClDummyColorBody = ClientData.m_ColorBody;
+		g_Config.m_ClDummyColorFeet = ClientData.m_ColorFeet;
+		GameClient()->SendDummyInfo(false);
+	}
+	else
+	{
+		str_copy(g_Config.m_ClPlayerSkin, ClientData.m_aSkinName);
+		g_Config.m_ClPlayerUseCustomColor = ClientData.m_UseCustomColor;
+		g_Config.m_ClPlayerColorBody = ClientData.m_ColorBody;
+		g_Config.m_ClPlayerColorFeet = ClientData.m_ColorFeet;
+		GameClient()->SendInfo(false);
+	}
+
+	char aMessage[192];
+	str_format(aMessage, sizeof(aMessage), "Скин игрока %s скопирован: %s.", ClientData.m_aName, ClientData.m_aSkinName);
+	Echo(aMessage);
+	return true;
+}
+
+bool CChat::HandleHourCommand(const char *pText)
+{
+	const char *pCommand = nullptr;
+	if(str_comp_nocase_num(pText, ".hours", 6) == 0 && (pText[6] == '\0' || pText[6] == ' '))
+		pCommand = ".hours";
+	else if(str_comp_nocase_num(pText, ".hour", 5) == 0 && (pText[5] == '\0' || pText[5] == ' '))
+		pCommand = ".hour";
+	if(!pCommand)
+		return false;
+
+	const char *pName = pText + str_length(pCommand);
+	while(*pName == ' ')
+		pName++;
+	char aName[MAX_NAME_LENGTH];
+	str_copy(aName, pName);
+	int Length = str_length(aName);
+	while(Length > 0 && aName[Length - 1] == ' ')
+		aName[--Length] = '\0';
+	if(Length >= 2 && aName[0] == '"' && aName[Length - 1] == '"')
+	{
+		mem_move(aName, aName + 1, Length - 2);
+		aName[Length - 2] = '\0';
+	}
+	if(aName[0] == '\0')
+	{
+		Echo("Использование: .hours \"player\"");
+		return true;
+	}
+	if(m_pHourRequest && m_pHourRequest->State() != EHttpState::DONE && m_pHourRequest->State() != EHttpState::ERROR && m_pHourRequest->State() != EHttpState::ABORTED)
+	{
+		Echo("Запрос часов уже выполняется...");
+		return true;
+	}
+
+	char aEscapedName[MAX_NAME_LENGTH * 3];
+	char aUrl[512];
+	EscapeUrl(aEscapedName, aName);
+	str_format(aUrl, sizeof(aUrl), "https://ddstats.tw/player/json?player=%s", aEscapedName);
+	m_pHourRequest = HttpGet(aUrl);
+	m_pHourRequest->Timeout(CTimeout{4000, 12000, 500, 2});
+	Http()->Run(m_pHourRequest);
+	str_copy(m_aHourPlayer, aName);
+	char aStatus[128];
+	str_format(aStatus, sizeof(aStatus), "Ищу часы игрока %s...", aName);
+	Echo(aStatus);
+	return true;
+}
+
+void CChat::UpdateHourRequest()
+{
+	if(!m_pHourRequest || (m_pHourRequest->State() != EHttpState::DONE && m_pHourRequest->State() != EHttpState::ERROR && m_pHourRequest->State() != EHttpState::ABORTED))
+		return;
+
+	char aMessage[256];
+	if(m_pHourRequest->State() != EHttpState::DONE)
+		str_format(aMessage, sizeof(aMessage), "Не удалось получить часы игрока %s: сервис DDStats не отвечает.", m_aHourPlayer);
+	else
+	{
+		json_value *pJson = m_pHourRequest->ResultJson();
+		const json_value *pActivity = pJson ? json_object_get(pJson, "general_activity") : nullptr;
+		const json_value *pSeconds = pActivity ? json_object_get(pActivity, "total_seconds_played") : nullptr;
+		double Seconds = -1.0;
+		if(pSeconds && pSeconds->type == json_integer)
+			Seconds = (double)pSeconds->u.integer;
+		else if(pSeconds && pSeconds->type == json_double)
+			Seconds = pSeconds->u.dbl;
+		if(Seconds >= 0.0)
+			str_format(aMessage, sizeof(aMessage), "%s: %.1f часов в игре.", m_aHourPlayer, Seconds / 3600.0);
+		else
+			str_format(aMessage, sizeof(aMessage), "Игрок %s не найден или часы отсутствуют.", m_aHourPlayer);
+		if(pJson)
+			json_value_free(pJson);
+	}
+	Echo(aMessage);
+	m_pHourRequest.reset();
+	m_aHourPlayer[0] = '\0';
+}
+
+static bool IsDirectGifUrl(const char *pUrl)
+{
+	const char *pGif = str_find_nocase(pUrl, ".gif");
+	return pGif && (pGif[4] == '\0' || pGif[4] == '?' || pGif[4] == '#');
+}
+
+static bool IsSupportedGifPage(const char *pUrl)
+{
+	return str_find_nocase(pUrl, "tenor.com/") ||
+	       str_find_nocase(pUrl, "giphy.com/") ||
+	       str_find_nocase(pUrl, "imgur.com/");
+}
+
+static void ReplaceAll(std::string &Text, const char *pFrom, const char *pTo)
+{
+	const size_t FromLength = str_length(pFrom);
+	const size_t ToLength = str_length(pTo);
+	for(size_t Position = 0; (Position = Text.find(pFrom, Position)) != std::string::npos; Position += ToLength)
+		Text.replace(Position, FromLength, pTo);
+}
+
+static bool ExtractGifUrlFromHtml(const unsigned char *pData, size_t DataSize, char *pUrl, size_t UrlSize)
+{
+	if(!pData || DataSize == 0 || DataSize > 4 * 1024 * 1024)
+		return false;
+	std::string Html((const char *)pData, DataSize);
+
+	auto ExtractAttribute = [&](size_t TagStart, size_t TagEnd, const char *pAttribute, std::string &Value) {
+		size_t At = Html.find(pAttribute, TagStart);
+		if(At == std::string::npos || At >= TagEnd)
+			return false;
+		At += str_length(pAttribute);
+		while(At < TagEnd && std::isspace((unsigned char)Html[At]))
+			At++;
+		if(At >= TagEnd || Html[At] != '=')
+			return false;
+		At++;
+		while(At < TagEnd && std::isspace((unsigned char)Html[At]))
+			At++;
+		if(At >= TagEnd || (Html[At] != '"' && Html[At] != '\''))
+			return false;
+		const char Quote = Html[At++];
+		const size_t End = Html.find(Quote, At);
+		if(End == std::string::npos || End > TagEnd)
+			return false;
+		Value = Html.substr(At, End - At);
+		return true;
+	};
+
+	std::string Candidate;
+	size_t Search = 0;
+	while((Search = Html.find("<meta", Search)) != std::string::npos)
+	{
+		const size_t End = Html.find('>', Search);
+		if(End == std::string::npos)
+			break;
+		const std::string Tag = Html.substr(Search, End - Search);
+		if((Tag.find("og:image") != std::string::npos || Tag.find("twitter:image") != std::string::npos) &&
+			ExtractAttribute(Search, End, "content", Candidate))
+			break;
+		Search = End + 1;
+	}
+
+	if(Candidate.empty())
+	{
+		for(const char *pKey : {"\"contentUrl\"", "\"url\""})
+		{
+			size_t At = Html.find(pKey);
+			if(At == std::string::npos)
+				continue;
+			At = Html.find(':', At + str_length(pKey));
+			At = At == std::string::npos ? At : Html.find('"', At + 1);
+			if(At == std::string::npos)
+				continue;
+			const size_t End = Html.find('"', At + 1);
+			if(End != std::string::npos)
+			{
+				Candidate = Html.substr(At + 1, End - At - 1);
+				break;
+			}
+		}
+	}
+
+	ReplaceAll(Candidate, "&amp;", "&");
+	ReplaceAll(Candidate, "\\/", "/");
+	ReplaceAll(Candidate, "\\u0026", "&");
+	if(Candidate.size() >= UrlSize || (!str_startswith(Candidate.c_str(), "https://") && !str_startswith(Candidate.c_str(), "http://")) || !IsDirectGifUrl(Candidate.c_str()))
+		return false;
+	str_copy(pUrl, Candidate.c_str(), UrlSize);
+	return true;
+}
+
+void CChat::RequestGifUrl(CLine &Line, const char *pUrl)
+{
+	str_copy(Line.m_aGifUrl, pUrl);
+	auto pGet = HttpGet(Line.m_aGifUrl);
+	pGet->Timeout(CTimeout{3000, 12000, 500, 2});
+	pGet->MaxResponseSize(16 * 1024 * 1024);
+	Line.m_pGifRequest = std::move(pGet);
+	Http()->Run(Line.m_pGifRequest);
+}
+
+void CChat::StartGifPreview(CLine &Line)
+{
+	if(!g_Config.m_TcChatGifPreview)
+		return;
+
+	const char *pUrl = str_find_nocase(Line.m_aText, "https://");
+	if(!pUrl)
+		pUrl = str_find_nocase(Line.m_aText, "http://");
+	if(!pUrl)
+		return;
+
+	const char *pEnd = pUrl;
+	while(*pEnd && !str_utf8_isspace((unsigned char)*pEnd) && *pEnd != '"' && *pEnd != '<' && *pEnd != '>')
+		pEnd++;
+	while(pEnd > pUrl && (pEnd[-1] == '.' || pEnd[-1] == ',' || pEnd[-1] == ')' || pEnd[-1] == ']'))
+		pEnd--;
+	const int UrlLength = minimum((int)sizeof(Line.m_aGifUrl) - 1, (int)(pEnd - pUrl));
+	if(UrlLength <= 0)
+		return;
+	char aUrl[256];
+	str_copy(aUrl, pUrl, UrlLength + 1);
+	if(str_find_nocase(aUrl, "imgur.com/") && !str_find_nocase(aUrl, "i.imgur.com/"))
+	{
+		const char *pId = str_find_nocase(aUrl, "imgur.com/") + str_length("imgur.com/");
+		if(!str_find(pId, "/"))
+		{
+			char aId[64];
+			str_copy(aId, pId);
+			char *pSuffix = (char *)str_find_nocase(aId, ".gifv");
+			if(pSuffix)
+				*pSuffix = '\0';
+			pSuffix = (char *)str_find(aId, "?");
+			if(pSuffix)
+				*pSuffix = '\0';
+			pSuffix = (char *)str_find(aId, "#");
+			if(pSuffix)
+				*pSuffix = '\0';
+			if(aId[0] != '\0')
+				str_format(aUrl, sizeof(aUrl), "https://i.imgur.com/%s.gif", aId);
+		}
+	}
+	if(!IsDirectGifUrl(aUrl) && !IsSupportedGifPage(aUrl))
+	{
+		return;
+	}
+
+	RequestGifUrl(Line, aUrl);
+}
+
+bool CChat::DecodeGifPreview(CLine &Line, const unsigned char *pData, size_t DataSize)
+{
+#if !defined(CONF_FAMILY_WINDOWS)
+	(void)Line;
+	(void)pData;
+	(void)DataSize;
+	return false;
+#else
+	if(!pData || DataSize < 6 || DataSize > 16 * 1024 * 1024 ||
+		(mem_comp(pData, "GIF87a", 6) != 0 && mem_comp(pData, "GIF89a", 6) != 0))
+		return false;
+
+	CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	IWICImagingFactory *pFactory = nullptr;
+	IWICBitmapDecoder *pDecoder = nullptr;
+	IStream *pStream = nullptr;
+	HGLOBAL Memory = GlobalAlloc(GMEM_MOVEABLE, DataSize);
+	if(!Memory)
+		return false;
+	void *pMemory = GlobalLock(Memory);
+	if(!pMemory)
+	{
+		GlobalFree(Memory);
+		return false;
+	}
+	mem_copy(pMemory, pData, DataSize);
+	GlobalUnlock(Memory);
+	if(FAILED(CreateStreamOnHGlobal(Memory, TRUE, &pStream)))
+	{
+		GlobalFree(Memory);
+		return false;
+	}
+
+	bool Success = false;
+	if(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pFactory))) &&
+		SUCCEEDED(pFactory->CreateDecoderFromStream(pStream, nullptr, WICDecodeMetadataCacheOnLoad, &pDecoder)))
+	{
+		UINT FrameCount = 0;
+		pDecoder->GetFrameCount(&FrameCount);
+		FrameCount = minimum<UINT>(FrameCount, 96);
+		size_t TotalBytes = 0;
+		for(UINT i = 0; i < FrameCount; ++i)
+		{
+			IWICBitmapFrameDecode *pFrame = nullptr;
+			IWICBitmapScaler *pScaler = nullptr;
+			IWICFormatConverter *pConverter = nullptr;
+			if(FAILED(pDecoder->GetFrame(i, &pFrame)))
+				break;
+
+			UINT SourceWidth = 0, SourceHeight = 0;
+			pFrame->GetSize(&SourceWidth, &SourceHeight);
+			if(SourceWidth == 0 || SourceHeight == 0)
+			{
+				pFrame->Release();
+				break;
+			}
+			const double Scale = minimum(1.0, minimum(420.0 / SourceWidth, 300.0 / SourceHeight));
+			const UINT Width = maximum<UINT>(1, round_to_int(SourceWidth * Scale));
+			const UINT Height = maximum<UINT>(1, round_to_int(SourceHeight * Scale));
+			const size_t FrameBytes = (size_t)Width * Height * 4;
+			if(FrameBytes == 0 || TotalBytes + FrameBytes > 32 * 1024 * 1024)
+			{
+				pFrame->Release();
+				break;
+			}
+
+			IWICBitmapSource *pSource = pFrame;
+			if((Width != SourceWidth || Height != SourceHeight) &&
+				SUCCEEDED(pFactory->CreateBitmapScaler(&pScaler)) &&
+				SUCCEEDED(pScaler->Initialize(pFrame, Width, Height, WICBitmapInterpolationModeFant)))
+				pSource = pScaler;
+
+			if(SUCCEEDED(pFactory->CreateFormatConverter(&pConverter)) &&
+				SUCCEEDED(pConverter->Initialize(pSource, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
+			{
+				CImageInfo Image;
+				Image.m_Width = Width;
+				Image.m_Height = Height;
+				Image.m_Format = CImageInfo::FORMAT_RGBA;
+				Image.m_pData = (uint8_t *)malloc(FrameBytes);
+				if(Image.m_pData && SUCCEEDED(pConverter->CopyPixels(nullptr, Width * 4, FrameBytes, Image.m_pData)))
+				{
+					CLine::SGifFrame GifFrame;
+					IWICMetadataQueryReader *pMetadata = nullptr;
+					if(SUCCEEDED(pFrame->GetMetadataQueryReader(&pMetadata)))
+					{
+						PROPVARIANT Delay;
+						PropVariantInit(&Delay);
+						if(SUCCEEDED(pMetadata->GetMetadataByName(L"/grctlext/Delay", &Delay)) && Delay.vt == VT_UI2)
+							GifFrame.m_DurationMs = std::clamp((int)Delay.uiVal * 10, 20, 10000);
+						PropVariantClear(&Delay);
+						pMetadata->Release();
+					}
+					GifFrame.m_Texture = Graphics()->LoadTextureRawMove(Image, 0, Line.m_aGifUrl);
+					if(GifFrame.m_Texture.IsValid())
+					{
+						Line.m_vGifFrames.push_back(GifFrame);
+						Line.m_GifWidth = Width;
+						Line.m_GifHeight = Height;
+						TotalBytes += FrameBytes;
+					}
+				}
+				else
+					Image.Free();
+			}
+			if(pConverter)
+				pConverter->Release();
+			if(pScaler)
+				pScaler->Release();
+			pFrame->Release();
+		}
+		Success = !Line.m_vGifFrames.empty();
+	}
+	if(pDecoder)
+		pDecoder->Release();
+	if(pFactory)
+		pFactory->Release();
+	pStream->Release();
+	if(Success)
+	{
+		Line.m_GifStartTime = time_get();
+		Line.m_aYOffset[0] = -1.0f;
+		Line.m_aYOffset[1] = -1.0f;
+	}
+	return Success;
+#endif
+}
+
+void CChat::UpdateGifPreviews()
+{
+	for(CLine &Line : m_aLines)
+	{
+		if(!Line.m_Initialized || !Line.m_pGifRequest || !Line.m_pGifRequest->Done())
+			continue;
+		const std::shared_ptr<CHttpRequest> pCompletedRequest = Line.m_pGifRequest;
+		Line.m_pGifRequest.reset();
+		if(pCompletedRequest->State() == EHttpState::DONE && pCompletedRequest->StatusCode() >= 200 && pCompletedRequest->StatusCode() < 300)
+		{
+			unsigned char *pResult = nullptr;
+			size_t ResultSize = 0;
+			pCompletedRequest->Result(&pResult, &ResultSize);
+			const bool IsGifData = ResultSize >= 6 &&
+					       (mem_comp(pResult, "GIF87a", 6) == 0 || mem_comp(pResult, "GIF89a", 6) == 0);
+			if(IsGifData)
+				Line.m_GifFailed = !DecodeGifPreview(Line, pResult, ResultSize);
+			else if(Line.m_GifResolveDepth < 2)
+			{
+				char aResolvedUrl[256];
+				if(ExtractGifUrlFromHtml(pResult, ResultSize, aResolvedUrl, sizeof(aResolvedUrl)))
+				{
+					Line.m_GifResolveDepth++;
+					RequestGifUrl(Line, aResolvedUrl);
+					continue;
+				}
+				Line.m_GifFailed = true;
+			}
+			else
+				Line.m_GifFailed = true;
+		}
+		else
+			Line.m_GifFailed = true;
+	}
+}
+
+IGraphics::CTextureHandle CChat::GifFrameTexture(const CLine &Line) const
+{
+	if(Line.m_vGifFrames.empty())
+		return IGraphics::CTextureHandle();
+	int64_t TotalMs = 0;
+	for(const auto &Frame : Line.m_vGifFrames)
+		TotalMs += Frame.m_DurationMs;
+	if(TotalMs <= 0)
+		return Line.m_vGifFrames.front().m_Texture;
+	int64_t Offset = ((time_get() - Line.m_GifStartTime) * 1000 / time_freq()) % TotalMs;
+	for(const auto &Frame : Line.m_vGifFrames)
+	{
+		if(Offset < Frame.m_DurationMs)
+			return Frame.m_Texture;
+		Offset -= Frame.m_DurationMs;
+	}
+	return Line.m_vGifFrames.front().m_Texture;
+}
+
 void CChat::OnConsoleInit()
 {
 	Console()->Register("say", "r[message]", CFGFLAG_CLIENT, ConSay, this, "Say in chat");
@@ -272,7 +782,9 @@ bool CChat::OnInput(const IInput::CEvent &Event)
 			m_ServerCommandsNeedSorting = false;
 		}
 
-		if(GameClient()->m_BindChat.ChatDoBinds(m_Input.GetString()))
+		if(HandleSkinCommand(m_Input.GetString()) || HandleHourCommand(m_Input.GetString()))
+			; // Local command, do not send it to the server.
+		else if(GameClient()->m_BindChat.ChatDoBinds(m_Input.GetString()))
 			; // Do nothing as bindchat was executed
 		else if(GameClient()->m_TClient.ChatDoSpecId(m_Input.GetString()))
 			; // Do nothing as specid was executed
@@ -286,19 +798,52 @@ bool CChat::OnInput(const IInput::CEvent &Event)
 	if(Event.m_Flags & IInput::FLAG_PRESS && Event.m_Key == KEY_TAB)
 	{
 		const bool ShiftPressed = Input()->ShiftIsPressed();
+		const char *pInputText = m_Input.GetString();
+		const char *pLocalArgument = nullptr;
+		for(const char *pCommand : {".skin", ".hours", ".hour"})
+		{
+			const int CommandLength = str_length(pCommand);
+			if(str_comp_nocase_num(pInputText, pCommand, CommandLength) == 0 && pInputText[CommandLength] == ' ')
+			{
+				pLocalArgument = pInputText + CommandLength;
+				while(*pLocalArgument == ' ')
+					pLocalArgument++;
+				break;
+			}
+		}
+		const bool LocalPlayerCommand = pLocalArgument != nullptr;
 
 		// fill the completion buffer
 		if(!m_CompletionUsed)
 		{
-			const char *pCursor = m_Input.GetString() + m_Input.GetCursorOffset();
-			for(size_t Count = 0; Count < m_Input.GetCursorOffset() && *(pCursor - 1) != ' '; --pCursor, ++Count)
-				;
-			m_PlaceholderOffset = pCursor - m_Input.GetString();
+			if(LocalPlayerCommand)
+			{
+				const char *pArgumentEnd = pLocalArgument + str_length(pLocalArgument);
+				m_PlaceholderOffset = pLocalArgument - pInputText;
+				m_PlaceholderLength = pArgumentEnd - pLocalArgument;
+				const char *pCompletionStart = pLocalArgument;
+				if(*pCompletionStart == '"')
+					pCompletionStart++;
+				const char *pCompletionEnd = pInputText + m_Input.GetCursorOffset();
+				if(pCompletionEnd > pArgumentEnd)
+					pCompletionEnd = pArgumentEnd;
+				if(pCompletionEnd > pCompletionStart && pCompletionEnd[-1] == '"')
+					pCompletionEnd--;
+				const int CompletionLength = maximum(0, (int)(pCompletionEnd - pCompletionStart));
+				str_truncate(m_aCompletionBuffer, sizeof(m_aCompletionBuffer), pCompletionStart, CompletionLength);
+			}
+			else
+			{
+				const char *pCursor = pInputText + m_Input.GetCursorOffset();
+				for(size_t Count = 0; Count < m_Input.GetCursorOffset() && *(pCursor - 1) != ' '; --pCursor, ++Count)
+					;
+				m_PlaceholderOffset = pCursor - pInputText;
 
-			for(m_PlaceholderLength = 0; *pCursor && *pCursor != ' '; ++pCursor)
-				++m_PlaceholderLength;
+				for(m_PlaceholderLength = 0; *pCursor && *pCursor != ' '; ++pCursor)
+					++m_PlaceholderLength;
 
-			str_truncate(m_aCompletionBuffer, sizeof(m_aCompletionBuffer), m_Input.GetString() + m_PlaceholderOffset, m_PlaceholderLength);
+				str_truncate(m_aCompletionBuffer, sizeof(m_aCompletionBuffer), pInputText + m_PlaceholderOffset, m_PlaceholderLength);
+			}
 		}
 
 		if(!m_CompletionUsed && m_aCompletionBuffer[0] != '/')
@@ -329,6 +874,32 @@ bool CChat::OnInput(const IInput::CEvent &Event)
 
 		if(GameClient()->m_BindChat.ChatDoAutocomplete(ShiftPressed))
 		{
+		}
+		else if(m_aCompletionBuffer[0] == '.' && m_PlaceholderOffset == 0)
+		{
+			const char *apLocalCommands[] = {".skin", ".hour", ".hours"};
+			const char *apMatches[3];
+			int NumMatches = 0;
+			for(const char *pCommand : apLocalCommands)
+			{
+				if(str_startswith_nocase(pCommand, m_aCompletionBuffer))
+					apMatches[NumMatches++] = pCommand;
+			}
+			if(NumMatches > 0)
+			{
+				if(ShiftPressed && m_CompletionUsed)
+					m_CompletionChosen--;
+				else if(!ShiftPressed)
+					m_CompletionChosen++;
+				m_CompletionChosen = (m_CompletionChosen + NumMatches) % NumMatches;
+				m_CompletionUsed = true;
+
+				char aBuf[MAX_LINE_LENGTH];
+				str_format(aBuf, sizeof(aBuf), "%s %s", apMatches[m_CompletionChosen], pInputText + m_PlaceholderOffset + m_PlaceholderLength);
+				m_PlaceholderLength = str_length(apMatches[m_CompletionChosen]) + 1;
+				m_Input.Set(aBuf);
+				m_Input.SetCursorOffset(m_PlaceholderLength);
+			}
 		}
 		else if(m_aCompletionBuffer[0] == '/' && !m_vServerCommands.empty())
 		{
@@ -439,7 +1010,7 @@ bool CChat::OnInput(const IInput::CEvent &Event)
 
 				// quote the name
 				char aQuoted[128];
-				if((m_Input.GetString()[0] == '/' || GameClient()->m_BindChat.CheckBindChat(m_Input.GetString())) && (str_find(pCompletionString, " ") || str_find(pCompletionString, "\"")))
+				if(LocalPlayerCommand || ((m_Input.GetString()[0] == '/' || GameClient()->m_BindChat.CheckBindChat(m_Input.GetString())) && (str_find(pCompletionString, " ") || str_find(pCompletionString, "\""))))
 				{
 					// escape the name
 					str_copy(aQuoted, "\"");
@@ -455,7 +1026,7 @@ bool CChat::OnInput(const IInput::CEvent &Event)
 
 				// add separator
 				const char *pSeparator = "";
-				if(*(m_Input.GetString() + m_PlaceholderOffset + m_PlaceholderLength) != ' ')
+				if(!LocalPlayerCommand && *(m_Input.GetString() + m_PlaceholderOffset + m_PlaceholderLength) != ' ')
 					pSeparator = m_PlaceholderOffset == 0 ? ": " : " ";
 				else if(m_PlaceholderOffset == 0)
 					pSeparator = ":";
@@ -618,6 +1189,86 @@ bool CChat::LineShouldHighlight(const char *pLine, const char *pName)
 	return false;
 }
 
+bool CChat::IsIgnoreTagActive() const
+{
+	const int LocalId = GameClient()->m_Snap.m_LocalClientId;
+	if(LocalId < 0 || !GameClient()->m_Snap.m_pLocalCharacter)
+		return false;
+	if(Client()->State() != IClient::STATE_ONLINE || !GameClient()->m_GameInfo.m_Race)
+		return false;
+	return GameClient()->LastRaceTick() >= 0;
+}
+
+bool CChat::IsFocusModeActive() const
+{
+	return g_Config.m_TcFocusMode && IsIgnoreTagActive();
+}
+
+bool CChat::IsIgnoreTagSafe()
+{
+	const int LocalId = GameClient()->m_Snap.m_LocalClientId;
+	if(LocalId < 0 || !GameClient()->m_Snap.m_pLocalCharacter)
+		return false;
+
+	CCharacter *pLocalChar = GameClient()->m_PredictedWorld.GetCharacterById(LocalId);
+	if(pLocalChar)
+	{
+		const CCharacterCore *pCore = pLocalChar->Core();
+		if(pCore->m_FreezeEnd != 0 || pCore->m_IsInFreeze || pCore->m_DeepFrozen || pCore->m_LiveFrozen)
+			return false;
+		return pLocalChar->IsGrounded();
+	}
+
+	const vec2 Pos = GameClient()->m_LocalCharacterPos;
+	if(GameClient()->m_aClients[LocalId].m_FreezeEnd != 0 || GameClient()->m_aClients[LocalId].m_DeepFrozen)
+		return false;
+	return Collision()->CheckPoint(Pos.x + 14.0f, Pos.y + 21.0f) || Collision()->CheckPoint(Pos.x - 14.0f, Pos.y + 21.0f);
+}
+
+void CChat::UpdateIgnoreTag()
+{
+	if(!g_Config.m_TcIgnoreTag || m_IgnoreTagPendingCount <= 0)
+	{
+		m_IgnoreTagSafeStart = 0;
+		return;
+	}
+
+	const int64_t Now = time();
+	if(!IsIgnoreTagActive())
+	{
+		char aBuf[sizeof(m_aIgnoreTagLastLine) + 64];
+		if(m_IgnoreTagPendingCount > 1)
+			str_format(aBuf, sizeof(aBuf), "Ignored tags x%d, last: %s", m_IgnoreTagPendingCount, m_aIgnoreTagLastLine);
+		else
+			str_format(aBuf, sizeof(aBuf), "Ignored tag: %s", m_aIgnoreTagLastLine);
+		m_IgnoreTagPendingCount = 0;
+		m_aIgnoreTagLastLine[0] = '\0';
+		m_IgnoreTagSafeStart = 0;
+		AddLine(CLIENT_MSG, 0, aBuf);
+	}
+	else if(IsIgnoreTagSafe())
+	{
+		if(m_IgnoreTagSafeStart == 0)
+			m_IgnoreTagSafeStart = Now;
+		if(Now - m_IgnoreTagSafeStart >= time_freq() * 3)
+		{
+			char aBuf[sizeof(m_aIgnoreTagLastLine) + 64];
+			if(m_IgnoreTagPendingCount > 1)
+				str_format(aBuf, sizeof(aBuf), "Ignored tags x%d, last: %s", m_IgnoreTagPendingCount, m_aIgnoreTagLastLine);
+			else
+				str_format(aBuf, sizeof(aBuf), "Ignored tag: %s", m_aIgnoreTagLastLine);
+			m_IgnoreTagPendingCount = 0;
+			m_aIgnoreTagLastLine[0] = '\0';
+			m_IgnoreTagSafeStart = 0;
+			AddLine(CLIENT_MSG, 0, aBuf);
+		}
+	}
+	else
+	{
+		m_IgnoreTagSafeStart = 0;
+	}
+}
+
 static constexpr const char *SAVES_HEADER[] = {
 	"Time",
 	"Player",
@@ -669,6 +1320,40 @@ void CChat::StoreSave(const char *pText)
 
 void CChat::AddLine(int ClientId, int Team, const char *pLine)
 {
+	if(ClientId == SERVER_MSG && str_startswith(pLine, "__cloude_dev "))
+	{
+		int DevClientId = -1;
+		int Enabled = 0;
+		if(sscanf(pLine, "__cloude_dev %d %d", &DevClientId, &Enabled) == 2 && in_range(DevClientId, MAX_CLIENTS - 1))
+			GameClient()->m_aClients[DevClientId].m_CloudeDevBadge = Enabled != 0;
+		return;
+	}
+
+	// Detect team invites, e.g. "'nameless tee' invited you to team 5. Use /team 5 to join."
+	// and offer an accept/ignore prompt on the media island.
+	if(ClientId == SERVER_MSG)
+	{
+		const char *pInvited = str_find_nocase(pLine, "invited you to team ");
+		if(pInvited)
+		{
+			int InviteTeam = -1;
+			if(sscanf(pInvited, "invited you to team %d", &InviteTeam) == 1 && InviteTeam >= 0)
+			{
+				char aInviter[32] = "";
+				if(pLine[0] == '\'')
+				{
+					const char *pEndQuote = str_find(pLine + 1, "'");
+					if(pEndQuote && pEndQuote > pLine + 1)
+					{
+						const int NameLen = minimum((int)sizeof(aInviter) - 1, (int)(pEndQuote - (pLine + 1)));
+						str_copy(aInviter, pLine + 1, NameLen + 1);
+					}
+				}
+				GameClient()->m_MediaIsland.NotifyTeamInvite(InviteTeam, aInviter);
+			}
+		}
+	}
+
 	if(*pLine == 0 ||
 		(ClientId == SERVER_MSG && !g_Config.m_ClShowChatSystem) ||
 		(ClientId >= 0 && (GameClient()->m_aClients[ClientId].m_aName[0] == '\0' || // unknown client
@@ -813,7 +1498,29 @@ void CChat::AddLine(int ClientId, int Team, const char *pLine)
 	}
 	CurrentLine.m_Highlighted = Highlighted;
 
+	const bool FocusSuppress = IsFocusModeActive() && Team != 1;
+	if(FocusSuppress)
+	{
+		CurrentLine.m_Highlighted = false;
+		Highlighted = false;
+	}
+
+	if(g_Config.m_TcIgnoreTag && Highlighted && ClientId >= 0 && Team != TEAM_WHISPER_RECV && IsIgnoreTagActive() && !IsIgnoreTagSafe())
+	{
+		const char *pAuthor = GameClient()->m_aClients[ClientId].m_aName;
+		if(pAuthor[0] != '\0')
+			str_format(m_aIgnoreTagLastLine, sizeof(m_aIgnoreTagLastLine), "%s: %s", pAuthor, pLine);
+		else
+			str_copy(m_aIgnoreTagLastLine, pLine);
+		m_IgnoreTagPendingCount++;
+		m_IgnoreTagSafeStart = 0;
+		CurrentLine.Reset(*this);
+		m_CurrentLine = (m_CurrentLine + MAX_LINES - 1) % MAX_LINES;
+		return;
+	}
+
 	str_copy(CurrentLine.m_aText, pLine);
+	StartGifPreview(CurrentLine);
 
 	if(CurrentLine.m_ClientId == SERVER_MSG)
 	{
@@ -881,7 +1588,11 @@ void CChat::AddLine(int ClientId, int Team, const char *pLine)
 
 	// play sound
 	int64_t Now = time();
-	if(ClientId == SERVER_MSG)
+	if(FocusSuppress)
+	{
+		// Focus Mode keeps the chat quiet except for the current DDRace team.
+	}
+	else if(ClientId == SERVER_MSG)
 	{
 		if(Now - m_aLastSoundPlayed[CHAT_SERVER] >= time_freq() * 3 / 10)
 		{
@@ -1102,8 +1813,12 @@ void CChat::OnPrepareLines(float y)
 			{
 				TextRender()->TextEx(&AppendCursor, pText);
 			}
-
 			Line.m_aYOffset[OffsetType] = AppendCursor.Height() + RealMsgPaddingY;
+			if(g_Config.m_TcChatGifPreview && !Line.m_vGifFrames.empty() && Line.m_GifWidth > 0 && Line.m_GifHeight > 0)
+			{
+				const float GifScale = minimum(LineWidth / (float)Line.m_GifWidth, 58.0f / (float)Line.m_GifHeight);
+				Line.m_aYOffset[OffsetType] += maximum(1.0f, Line.m_GifHeight * GifScale) + FontSize * 0.4f;
+			}
 		}
 
 		y -= Line.m_aYOffset[OffsetType];
@@ -1243,7 +1958,6 @@ void CChat::OnPrepareLines(float y)
 			TextRender()->CreateOrAppendTextContainer(Line.m_TextContainerIndex, &AppendCursor, pText);
 			AppendCursor.m_vColorSplits.clear();
 		}
-
 		if(!g_Config.m_ClChatOld && (Line.m_aText[0] != '\0' || Line.m_aName[0] != '\0'))
 		{
 			float FullWidth = RealMsgPaddingX * 1.5f;
@@ -1254,6 +1968,11 @@ void CChat::OnPrepareLines(float y)
 			else
 			{
 				FullWidth += maximum(LineCursor.m_LongestLineWidth, AppendCursor.m_LongestLineWidth);
+			}
+			if(g_Config.m_TcChatGifPreview && !Line.m_vGifFrames.empty() && Line.m_GifWidth > 0 && Line.m_GifHeight > 0)
+			{
+				const float GifScale = minimum(LineWidth / (float)Line.m_GifWidth, 58.0f / (float)Line.m_GifHeight);
+				FullWidth = maximum(FullWidth, RealMsgPaddingX * 1.5f + Line.m_GifWidth * GifScale);
 			}
 			Graphics()->SetColor(1, 1, 1, 1);
 			Line.m_QuadContainerIndex = Graphics()->CreateRectQuadContainer(Begin, y, FullWidth, Line.m_aYOffset[OffsetType], MessageRounding(), IGraphics::CORNER_ALL);
@@ -1271,6 +1990,10 @@ void CChat::OnRender()
 {
 	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
 		return;
+
+	UpdateIgnoreTag();
+	UpdateHourRequest();
+	UpdateGifPreviews();
 
 	// send pending chat messages
 	if(m_PendingChatCounter > 0 && m_LastChatSend + time_freq() < time())
@@ -1399,6 +2122,8 @@ void CChat::OnRender()
 			break;
 		if(Now > Line.m_Time + 16 * time_freq() && !m_PrevShowChat)
 			break;
+		if(IsFocusModeActive() && !Line.m_Team)
+			continue;
 
 		y -= Line.m_aYOffset[OffsetType];
 
@@ -1441,6 +2166,26 @@ void CChat::OnRender()
 			const ColorRGBA TextColor = TextRender()->DefaultTextColor().WithMultipliedAlpha(Blend);
 			const ColorRGBA TextOutlineColor = TextRender()->DefaultTextOutlineColor().WithMultipliedAlpha(Blend);
 			TextRender()->RenderTextContainer(Line.m_TextContainerIndex, TextColor, TextOutlineColor, 0, (y + RealMsgPaddingY / 2.0f) - Line.m_TextYOffset);
+		}
+
+		if(g_Config.m_TcChatGifPreview && !Line.m_vGifFrames.empty() && Line.m_GifWidth > 0 && Line.m_GifHeight > 0)
+		{
+			const float AvailableWidth = (IsScoreBoardOpen ? maximum(85.0f, FontSize() * 85.0f / 6.0f) : (float)g_Config.m_ClChatWidth) - RealMsgPaddingX * 1.5f;
+			const float GifScale = minimum(AvailableWidth / (float)Line.m_GifWidth, 58.0f / (float)Line.m_GifHeight);
+			const float GifW = maximum(1.0f, Line.m_GifWidth * GifScale);
+			const float GifH = maximum(1.0f, Line.m_GifHeight * GifScale);
+			const float GifX = x + RealMsgPaddingX / 2.0f;
+			const float GifY = y + Line.m_aYOffset[OffsetType] - GifH - RealMsgPaddingY / 2.0f;
+			const IGraphics::CTextureHandle Texture = GifFrameTexture(Line);
+			if(Texture.IsValid())
+			{
+				Graphics()->TextureSet(Texture);
+				Graphics()->QuadsBegin();
+				Graphics()->SetColor(1.0f, 1.0f, 1.0f, Blend);
+				IGraphics::CQuadItem Quad(GifX, GifY, GifW, GifH);
+				Graphics()->QuadsDrawTL(&Quad, 1);
+				Graphics()->QuadsEnd();
+			}
 		}
 	}
 }

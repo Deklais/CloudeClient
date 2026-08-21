@@ -7,24 +7,39 @@
 #include <base/vmath.h>
 
 #include <engine/client.h>
+#include <engine/graphics.h>
 #include <engine/shared/config.h>
+#include <engine/textrender.h>
 
 #include <generated/protocol.h>
 
+#include <game/client/cloude_input.h>
 #include <game/client/components/camera.h>
 #include <game/client/components/chat.h>
 #include <game/client/components/menus.h>
 #include <game/client/components/scoreboard.h>
 #include <game/client/gameclient.h>
+#include <game/client/prediction/entities/character.h>
+#include <game/client/ui.h>
 #include <game/collision.h>
 
 CControls::CControls()
 {
 	mem_zero(&m_aLastData, sizeof(m_aLastData));
+	mem_zero(&m_aFastInput, sizeof(m_aFastInput));
 	std::fill(std::begin(m_aMousePos), std::end(m_aMousePos), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aMousePosOnAction), std::end(m_aMousePosOnAction), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aTargetPos), std::end(m_aTargetPos), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aMouseInputType), std::end(m_aMouseInputType), EMouseInputType::ABSOLUTE);
+	std::fill(std::begin(m_aFirePressed), std::end(m_aFirePressed), false);
+	std::fill(std::begin(m_aBestPlusDynamicMovementBoostUntil), std::end(m_aBestPlusDynamicMovementBoostUntil), -1);
+	std::fill(std::begin(m_aBestPlusDynamicAimHookBoostUntil), std::end(m_aBestPlusDynamicAimHookBoostUntil), -1);
+	std::fill(std::begin(m_aSkillAssistLastDirection), std::end(m_aSkillAssistLastDirection), 0);
+	std::fill(std::begin(m_aSkillAssistHookBufferUntil), std::end(m_aSkillAssistHookBufferUntil), -1);
+	std::fill(std::begin(m_aSkillAssistJumpBufferUntil), std::end(m_aSkillAssistJumpBufferUntil), -1);
+	std::fill(std::begin(m_aAutoFireNext), std::end(m_aAutoFireNext), 0);
+	std::fill(std::begin(m_aAutoSwapGunHammerStage), std::end(m_aAutoSwapGunHammerStage), 0);
+	std::fill(std::begin(m_aAutoSwapReturnGunPending), std::end(m_aAutoSwapReturnGunPending), false);
 }
 
 void CControls::OnReset()
@@ -47,9 +62,19 @@ void CControls::ResetInput(int Dummy)
 	m_aLastData[Dummy].m_Fire &= INPUT_STATE_MASK;
 	m_aLastData[Dummy].m_Jump = 0;
 	m_aInputData[Dummy] = m_aLastData[Dummy];
+	m_aFastInput[Dummy] = m_aInputData[Dummy];
 
 	m_aInputDirectionLeft[Dummy] = 0;
 	m_aInputDirectionRight[Dummy] = 0;
+	m_aFirePressed[Dummy] = false;
+	m_aBestPlusDynamicMovementBoostUntil[Dummy] = -1;
+	m_aBestPlusDynamicAimHookBoostUntil[Dummy] = -1;
+	m_aSkillAssistLastDirection[Dummy] = 0;
+	m_aSkillAssistHookBufferUntil[Dummy] = -1;
+	m_aSkillAssistJumpBufferUntil[Dummy] = -1;
+	m_aAutoFireNext[Dummy] = 0;
+	m_aAutoSwapGunHammerStage[Dummy] = 0;
+	m_aAutoSwapReturnGunPending[Dummy] = false;
 }
 
 void CControls::OnPlayerDeath()
@@ -82,6 +107,46 @@ void CControls::ConKeyInputCounter(IConsole::IResult *pResult, void *pUserData)
 		return;
 
 	int *pVariable = pState->m_apVariables[g_Config.m_ClDummy];
+	if(((*pVariable) & 1) != pResult->GetInteger(0))
+		(*pVariable)++;
+	*pVariable &= INPUT_STATE_MASK;
+}
+
+int CControls::CloudeCurrentWeapon(int Dummy) const
+{
+	int ClientId = GameClient()->m_aLocalIds[Dummy];
+	if(Dummy == g_Config.m_ClDummy)
+		ClientId = GameClient()->m_Snap.m_LocalClientId;
+	CCharacter *pCharacter = ClientId >= 0 ? GameClient()->m_PredictedWorld.GetCharacterById(ClientId) : nullptr;
+	if(pCharacter)
+		return pCharacter->GetActiveWeapon();
+	if(Dummy == g_Config.m_ClDummy && GameClient()->m_Snap.m_pLocalCharacter)
+		return GameClient()->m_Snap.m_pLocalCharacter->m_Weapon;
+	return -1;
+}
+
+void CControls::ConKeyInputFireCounter(IConsole::IResult *pResult, void *pUserData)
+{
+	CInputState *pState = (CInputState *)pUserData;
+
+	if((pState->m_pControls->GameClient()->m_GameInfo.m_BugDDRaceInput && pState->m_pControls->GameClient()->m_Snap.m_SpecInfo.m_Active) || pState->m_pControls->GameClient()->m_Spectator.IsActive())
+		return;
+
+	const int Dummy = g_Config.m_ClDummy;
+	const bool Pressed = pResult->GetInteger(0) != 0;
+	pState->m_pControls->m_aFirePressed[Dummy] = Pressed;
+
+	int *pVariable = pState->m_apVariables[Dummy];
+	if(Pressed && g_Config.m_TcAutoSwapGunHammer && pState->m_pControls->CloudeCurrentWeapon(Dummy) == WEAPON_GUN)
+	{
+		pState->m_pControls->m_aInputData[Dummy].m_WantedWeapon = WEAPON_HAMMER + 1;
+		pState->m_pControls->m_aAutoSwapGunHammerStage[Dummy] = 1;
+		if((*pVariable & 1) != 0)
+			(*pVariable)++;
+		*pVariable &= INPUT_STATE_MASK;
+		return;
+	}
+
 	if(((*pVariable) & 1) != pResult->GetInteger(0))
 		(*pVariable)++;
 	*pVariable &= INPUT_STATE_MASK;
@@ -131,7 +196,7 @@ void CControls::OnConsoleInit()
 	}
 	{
 		static CInputState s_State = {this, {&m_aInputData[0].m_Fire, &m_aInputData[1].m_Fire}};
-		Console()->Register("+fire", "", CFGFLAG_CLIENT, ConKeyInputCounter, &s_State, "Fire");
+		Console()->Register("+fire", "", CFGFLAG_CLIENT, ConKeyInputFireCounter, &s_State, "Fire");
 	}
 	{
 		static CInputState s_State = {this, {&m_aShowHookColl[0], &m_aShowHookColl[1]}};
@@ -178,6 +243,67 @@ void CControls::OnMessage(int Msg, void *pRawMsg)
 			m_aInputData[g_Config.m_ClDummy].m_WantedWeapon = pMsg->m_Weapon + 1;
 		// We don't really know ammo count, until we'll switch to that weapon, but any non-zero count will suffice here
 		m_aAmmoCount[maximum(0, pMsg->m_Weapon % NUM_WEAPONS)] = 10;
+	}
+}
+
+void CControls::ApplySkillAssist(CNetObj_PlayerInput &Input, int Dummy, bool InjectBufferedPress)
+{
+	const int CurrentTick = Client()->GameTick(Dummy);
+	if(g_Config.m_TcMicroDirectionAssist)
+	{
+		if(Input.m_Direction != 0)
+			m_aSkillAssistLastDirection[Dummy] = Input.m_Direction;
+		else if(m_aInputDirectionLeft[Dummy] && m_aInputDirectionRight[Dummy] && m_aSkillAssistLastDirection[Dummy] != 0)
+			Input.m_Direction = m_aSkillAssistLastDirection[Dummy];
+	}
+	else if(Input.m_Direction != 0)
+	{
+		m_aSkillAssistLastDirection[Dummy] = Input.m_Direction;
+	}
+
+	if(g_Config.m_TcHookTimingBuffer)
+	{
+		if(Input.m_Hook != 0)
+			m_aSkillAssistHookBufferUntil[Dummy] = CurrentTick + 2;
+		else if(InjectBufferedPress && CurrentTick <= m_aSkillAssistHookBufferUntil[Dummy])
+		{
+			Input.m_Hook = 1;
+			m_aSkillAssistHookBufferUntil[Dummy] = -1;
+		}
+		else
+			m_aSkillAssistHookBufferUntil[Dummy] = -1;
+	}
+	else
+	{
+		m_aSkillAssistHookBufferUntil[Dummy] = -1;
+	}
+
+	if(g_Config.m_TcJumpBuffer)
+	{
+		int ClientId = GameClient()->m_aLocalIds[Dummy];
+		if(Dummy == g_Config.m_ClDummy)
+			ClientId = GameClient()->m_Snap.m_LocalClientId;
+		CCharacter *pCharacter = ClientId >= 0 ? GameClient()->m_PredictedWorld.GetCharacterById(ClientId) : nullptr;
+		const bool Grounded = pCharacter && pCharacter->IsGrounded();
+
+		if(Input.m_Jump != 0)
+		{
+			if(!Grounded)
+				m_aSkillAssistJumpBufferUntil[Dummy] = CurrentTick + 2;
+			else
+				m_aSkillAssistJumpBufferUntil[Dummy] = -1;
+		}
+		else if(InjectBufferedPress && Grounded && CurrentTick <= m_aSkillAssistJumpBufferUntil[Dummy])
+		{
+			Input.m_Jump = 1;
+			m_aSkillAssistJumpBufferUntil[Dummy] = -1;
+		}
+		else
+			m_aSkillAssistJumpBufferUntil[Dummy] = -1;
+	}
+	else
+	{
+		m_aSkillAssistJumpBufferUntil[Dummy] = -1;
 	}
 }
 
@@ -229,6 +355,9 @@ int CControls::SnapInput(int *pData)
 	// we freeze the input if chat or menu is activated
 	if(!(m_aInputData[g_Config.m_ClDummy].m_PlayerFlags & PLAYERFLAG_PLAYING))
 	{
+		m_aAutoFireNext[g_Config.m_ClDummy] = 0;
+		m_aAutoSwapGunHammerStage[g_Config.m_ClDummy] = 0;
+		m_aAutoSwapReturnGunPending[g_Config.m_ClDummy] = false;
 		if(!GameClient()->m_GameInfo.m_BugDDRaceInput)
 			ResetInput(g_Config.m_ClDummy);
 
@@ -285,6 +414,71 @@ int CControls::SnapInput(int *pData)
 			m_aInputData[g_Config.m_ClDummy].m_Direction = -1;
 		if(!m_aInputDirectionLeft[g_Config.m_ClDummy] && m_aInputDirectionRight[g_Config.m_ClDummy])
 			m_aInputData[g_Config.m_ClDummy].m_Direction = 1;
+
+		ApplySkillAssist(m_aInputData[g_Config.m_ClDummy], g_Config.m_ClDummy, false);
+
+		if(g_Config.m_TcAutoFire && (m_aInputData[g_Config.m_ClDummy].m_Fire & 1) != 0)
+		{
+			const int64_t Now = time_get();
+			const int Speed = std::clamp(g_Config.m_TcAutoFireSpeed, 1, 25);
+			const int64_t Interval = time_freq() / Speed;
+			if(m_aAutoFireNext[g_Config.m_ClDummy] == 0)
+			{
+				m_aAutoFireNext[g_Config.m_ClDummy] = Now + Interval;
+			}
+			else if(Now >= m_aAutoFireNext[g_Config.m_ClDummy])
+			{
+				m_aInputData[g_Config.m_ClDummy].m_Fire = (m_aInputData[g_Config.m_ClDummy].m_Fire + 2) & INPUT_STATE_MASK;
+				m_aAutoFireNext[g_Config.m_ClDummy] = Now + Interval;
+			}
+		}
+		else
+		{
+			m_aAutoFireNext[g_Config.m_ClDummy] = 0;
+		}
+
+		if(g_Config.m_TcAutoSwapGunHammer && GameClient()->m_Snap.m_pLocalCharacter)
+		{
+			const bool FireHeld = m_aFirePressed[g_Config.m_ClDummy];
+			const bool FireWasHeld = (m_aLastData[g_Config.m_ClDummy].m_Fire & 1) != 0;
+			const int CurrentWeapon = CloudeCurrentWeapon(g_Config.m_ClDummy);
+
+			if(FireHeld && m_aAutoSwapGunHammerStage[g_Config.m_ClDummy] == 1)
+			{
+				m_aInputData[g_Config.m_ClDummy].m_WantedWeapon = WEAPON_HAMMER + 1;
+				if((m_aInputData[g_Config.m_ClDummy].m_Fire & 1) != 0)
+					m_aInputData[g_Config.m_ClDummy].m_Fire = (m_aInputData[g_Config.m_ClDummy].m_Fire + 1) & INPUT_STATE_MASK;
+				m_aAutoSwapGunHammerStage[g_Config.m_ClDummy] = 2;
+			}
+			else if(FireHeld && m_aAutoSwapGunHammerStage[g_Config.m_ClDummy] == 2)
+			{
+				m_aInputData[g_Config.m_ClDummy].m_WantedWeapon = WEAPON_HAMMER + 1;
+				m_aAutoSwapReturnGunPending[g_Config.m_ClDummy] = g_Config.m_TcAutoSwapReturnGun != 0;
+				if((m_aInputData[g_Config.m_ClDummy].m_Fire & 1) == 0)
+					m_aInputData[g_Config.m_ClDummy].m_Fire = (m_aInputData[g_Config.m_ClDummy].m_Fire + 1) & INPUT_STATE_MASK;
+				m_aAutoSwapGunHammerStage[g_Config.m_ClDummy] = 0;
+			}
+			else if(FireHeld && !FireWasHeld && CurrentWeapon == WEAPON_GUN)
+			{
+				m_aInputData[g_Config.m_ClDummy].m_WantedWeapon = WEAPON_HAMMER + 1;
+				if((m_aInputData[g_Config.m_ClDummy].m_Fire & 1) != 0)
+					m_aInputData[g_Config.m_ClDummy].m_Fire = (m_aInputData[g_Config.m_ClDummy].m_Fire + 1) & INPUT_STATE_MASK;
+				m_aAutoSwapGunHammerStage[g_Config.m_ClDummy] = 2;
+			}
+			else if(!FireHeld && FireWasHeld && m_aAutoSwapReturnGunPending[g_Config.m_ClDummy])
+			{
+				m_aInputData[g_Config.m_ClDummy].m_WantedWeapon = WEAPON_GUN + 1;
+				m_aAutoSwapGunHammerStage[g_Config.m_ClDummy] = 0;
+				m_aAutoSwapReturnGunPending[g_Config.m_ClDummy] = false;
+			}
+			else if(!FireHeld)
+				m_aAutoSwapGunHammerStage[g_Config.m_ClDummy] = 0;
+		}
+		else
+		{
+			m_aAutoSwapGunHammerStage[g_Config.m_ClDummy] = 0;
+			m_aAutoSwapReturnGunPending[g_Config.m_ClDummy] = false;
+		}
 
 		// dummy copy moves
 		if(g_Config.m_ClDummyCopyMoves)
@@ -368,6 +562,8 @@ void CControls::OnRender()
 	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
 		return;
 
+	UpdateFastInputAutoTune();
+
 	if(g_Config.m_ClAutoswitchWeaponsOutOfAmmo && !GameClient()->m_GameInfo.m_UnlimitedAmmo && GameClient()->m_Snap.m_pLocalCharacter)
 	{
 		// Keep track of ammo count, we know weapon ammo only when we switch to that weapon, this is tracked on server and protocol does not track that
@@ -407,6 +603,195 @@ void CControls::OnRender()
 	{
 		m_aTargetPos[g_Config.m_ClDummy] = m_aMousePos[g_Config.m_ClDummy];
 	}
+
+	RenderFastInputAutoTune();
+	RenderInputDoctor();
+}
+
+void CControls::StartFastInputAutoTune(EFastInputAutoTune Type)
+{
+	m_FastInputAutoTune = SFastInputAutoTune{};
+	m_FastInputAutoTune.m_Type = Type;
+	m_FastInputAutoTune.m_StartTime = time_get();
+	m_FastInputAutoTune.m_LastSampleTime = m_FastInputAutoTune.m_StartTime - time_freq();
+	const int Dummy = g_Config.m_ClDummy;
+	m_FastInputAutoTune.m_LastDirection = (m_aInputDirectionRight[Dummy] != 0) - (m_aInputDirectionLeft[Dummy] != 0);
+	m_FastInputAutoTune.m_LastJump = m_aInputData[Dummy].m_Jump;
+	m_FastInputAutoTune.m_LastHook = m_aInputData[Dummy].m_Hook;
+	m_FastInputAutoTune.m_LastMousePos = m_aMousePos[Dummy];
+	str_format(m_FastInputAutoTune.m_aStatus, sizeof(m_FastInputAutoTune.m_aStatus), "%s auto tuning started", Type == EFastInputAutoTune::MOVEMENT ? "Movement" : "Aim/Hook");
+}
+
+void CControls::UpdateFastInputAutoTune()
+{
+	if(!FastInputAutoTuneRunning())
+		return;
+
+	const int64_t Now = time_get();
+	const int64_t Freq = time_freq();
+	if(!GameClient()->m_Snap.m_pLocalInfo)
+	{
+		m_FastInputAutoTune.m_Type = EFastInputAutoTune::NONE;
+		str_copy(m_FastInputAutoTune.m_aStatus, "Auto tuning cancelled: join a server first");
+		return;
+	}
+
+	if(Now - m_FastInputAutoTune.m_LastSampleTime >= Freq / 20)
+	{
+		const int Dummy = g_Config.m_ClDummy;
+		const int Ping = std::clamp(GameClient()->m_Snap.m_pLocalInfo->m_Latency, 0, 999);
+		m_FastInputAutoTune.m_Samples++;
+		m_FastInputAutoTune.m_PingSum += Ping;
+		m_FastInputAutoTune.m_PingMin = minimum(m_FastInputAutoTune.m_PingMin, Ping);
+		m_FastInputAutoTune.m_PingMax = maximum(m_FastInputAutoTune.m_PingMax, Ping);
+
+		const int Direction = (m_aInputDirectionRight[Dummy] != 0) - (m_aInputDirectionLeft[Dummy] != 0);
+		const int Jump = m_aInputData[Dummy].m_Jump;
+		const int Hook = m_aInputData[Dummy].m_Hook;
+		if(Direction != 0 || Jump)
+			m_FastInputAutoTune.m_MovementFrames++;
+		if(Direction != m_FastInputAutoTune.m_LastDirection || Jump != m_FastInputAutoTune.m_LastJump)
+			m_FastInputAutoTune.m_MovementChanges++;
+		if(Hook)
+			m_FastInputAutoTune.m_HookFrames++;
+		if(Hook && !m_FastInputAutoTune.m_LastHook)
+			m_FastInputAutoTune.m_HookPresses++;
+
+		m_FastInputAutoTune.m_AimTravel += minimum(distance(m_aMousePos[Dummy], m_FastInputAutoTune.m_LastMousePos), 600.0f);
+		m_FastInputAutoTune.m_LastDirection = Direction;
+		m_FastInputAutoTune.m_LastJump = Jump;
+		m_FastInputAutoTune.m_LastHook = Hook;
+		m_FastInputAutoTune.m_LastMousePos = m_aMousePos[Dummy];
+		m_FastInputAutoTune.m_LastSampleTime = Now;
+	}
+
+	if(Now - m_FastInputAutoTune.m_StartTime >= Freq * 10)
+		FinishFastInputAutoTune();
+}
+
+void CControls::FinishFastInputAutoTune()
+{
+	if(m_FastInputAutoTune.m_Samples <= 0)
+	{
+		str_copy(m_FastInputAutoTune.m_aStatus, "Auto tuning failed: no samples");
+		m_FastInputAutoTune.m_Type = EFastInputAutoTune::NONE;
+		return;
+	}
+
+	const int AvgPing = m_FastInputAutoTune.m_PingSum / m_FastInputAutoTune.m_Samples;
+	const int Jitter = m_FastInputAutoTune.m_PingMax - m_FastInputAutoTune.m_PingMin;
+	const float MovementActivity = m_FastInputAutoTune.m_MovementFrames / (float)m_FastInputAutoTune.m_Samples;
+	const float HookActivity = m_FastInputAutoTune.m_HookFrames / (float)m_FastInputAutoTune.m_Samples;
+	const float AimTravelPerSample = m_FastInputAutoTune.m_AimTravel / (float)m_FastInputAutoTune.m_Samples;
+	const float PingScore = std::clamp(AvgPing / 80.0f, 0.0f, 1.0f);
+	const float StabilityScore = std::clamp(1.0f - Jitter / 45.0f, 0.0f, 1.0f);
+
+	if(m_FastInputAutoTune.m_Type == EFastInputAutoTune::MOVEMENT)
+	{
+		const float ChangeRate = std::clamp(m_FastInputAutoTune.m_MovementChanges / (float)m_FastInputAutoTune.m_Samples, 0.0f, 0.35f);
+		const float ActivityScore = std::clamp(MovementActivity * 0.75f + ChangeRate * 1.25f, 0.0f, 1.0f);
+		const int Amount = std::clamp(round_to_int(18.0f + PingScore * 16.0f + StabilityScore * 8.0f + ActivityScore * 14.0f), 14, 60);
+		g_Config.m_TcFastInputBestPlusMovement = Amount;
+		str_format(m_FastInputAutoTune.m_aStatus, sizeof(m_FastInputAutoTune.m_aStatus), "Movement applied: %d ms (avg %d, jitter %d)", Amount, AvgPing, Jitter);
+	}
+	else if(m_FastInputAutoTune.m_Type == EFastInputAutoTune::AIM_HOOK)
+	{
+		const float HookPressScore = std::clamp(m_FastInputAutoTune.m_HookPresses / 8.0f, 0.0f, 1.0f);
+		const float AimScore = std::clamp(AimTravelPerSample / 85.0f, 0.0f, 1.0f);
+		const float HookScore = std::clamp(HookActivity * 0.5f + HookPressScore * 0.35f + AimScore * 0.15f, 0.0f, 1.0f);
+		const int Amount = std::clamp(round_to_int(16.0f + PingScore * 14.0f + StabilityScore * 7.0f + HookScore * 13.0f), 14, 60);
+		g_Config.m_TcFastInputBestPlusAimHook = Amount;
+		str_format(m_FastInputAutoTune.m_aStatus, sizeof(m_FastInputAutoTune.m_aStatus), "Aim/Hook applied: %d ms (avg %d, jitter %d)", Amount, AvgPing, Jitter);
+	}
+
+	m_FastInputAutoTune.m_Type = EFastInputAutoTune::NONE;
+}
+
+void CControls::RenderFastInputAutoTune()
+{
+	if(!FastInputAutoTuneRunning())
+		return;
+
+	const float Height = 300.0f;
+	const float Width = Height * Graphics()->ScreenAspect();
+	Graphics()->MapScreen(0.0f, 0.0f, Width, Height);
+
+	const int Remaining = std::clamp(10 - (int)((time_get() - m_FastInputAutoTune.m_StartTime) / time_freq()), 0, 10);
+	char aBuf[160];
+	if(m_FastInputAutoTune.m_Type == EFastInputAutoTune::MOVEMENT)
+		str_format(aBuf, sizeof(aBuf), "Movement auto tuning: %ds left - move and jump", Remaining);
+	else
+		str_format(aBuf, sizeof(aBuf), "Aim/Hook auto tuning: %ds left - hook and aim", Remaining);
+
+	const float FontSize = 10.0f;
+	const float TextWidth = TextRender()->TextWidth(FontSize, aBuf);
+	TextRender()->TextColor(ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f));
+	TextRender()->Text(Width / 2.0f - TextWidth / 2.0f, 42.0f, FontSize, aBuf);
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+}
+
+void CControls::RenderInputDoctor()
+{
+	if(!g_Config.m_TcInputDoctor || Client()->State() != IClient::STATE_ONLINE || GameClient()->m_Menus.IsActive())
+		return;
+
+	const float ScreenHeight = 300.0f;
+	const float ScreenWidth = ScreenHeight * Graphics()->ScreenAspect();
+	Graphics()->MapScreen(0.0f, 0.0f, ScreenWidth, ScreenHeight);
+
+	CUIRect Panel;
+	Panel.x = 8.0f;
+	Panel.y = 42.0f;
+	Panel.w = 128.0f;
+	Panel.h = 68.0f;
+	Panel.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.48f), IGraphics::CORNER_ALL, 6.0f);
+
+	CUIRect Content = Panel;
+	Content.Margin(6.0f, &Content);
+
+	const int Dummy = g_Config.m_ClDummy;
+	const int CurrentTick = Client()->GameTick(Dummy);
+	const CNetObj_PlayerInput &Real = m_aInputData[Dummy];
+	const CNetObj_PlayerInput &Fast = m_aFastInput[Dummy];
+
+	const char *pMode = "off";
+	if(g_Config.m_TcFastInput)
+	{
+		switch(g_Config.m_TcFastInputMode)
+		{
+		case 0: pMode = "tater"; break;
+		case 1: pMode = "saiko"; break;
+		case 2: pMode = "cloude"; break;
+		case 3: pMode = "cloude+"; break;
+		default: pMode = "?"; break;
+		}
+	}
+
+	char aLine[160];
+	const float FontSize = 6.5f;
+	auto RenderLine = [&](const char *pText) {
+		CUIRect Row;
+		Content.HSplitTop(9.0f, &Row, &Content);
+		Ui()->DoLabel(&Row, pText, FontSize, TEXTALIGN_ML);
+	};
+
+	TextRender()->TextColor(ColorRGBA(1.0f, 1.0f, 1.0f, 0.92f));
+	RenderLine("Input Doctor");
+	str_format(aLine, sizeof(aLine), "real  H:%d J:%d F:%d D:%d", Real.m_Hook != 0, Real.m_Jump != 0, Real.m_Fire & 1, Real.m_Direction);
+	RenderLine(aLine);
+	str_format(aLine, sizeof(aLine), "fast  H:%d J:%d F:%d D:%d", Fast.m_Hook != 0, Fast.m_Jump != 0, Fast.m_Fire & 1, Fast.m_Direction);
+	RenderLine(aLine);
+	str_format(aLine, sizeof(aLine), "mode  %s  M:%d A:%d ticks", pMode, CloudeInput::PredictionTicks(GameClient()), CloudeInput::AimHookPredictionTicks(GameClient()));
+	RenderLine(aLine);
+	str_format(aLine, sizeof(aLine), "ms    M:%d  A:%d", CloudeInput::MovementAmountMs(GameClient()), CloudeInput::AimHookAmountMs(GameClient()));
+	RenderLine(aLine);
+	str_format(aLine, sizeof(aLine), "buf   hook:%d jump:%d boost:%d/%d",
+		maximum(0, m_aSkillAssistHookBufferUntil[Dummy] - CurrentTick),
+		maximum(0, m_aSkillAssistJumpBufferUntil[Dummy] - CurrentTick),
+		maximum(0, m_aBestPlusDynamicMovementBoostUntil[Dummy] - CurrentTick),
+		maximum(0, m_aBestPlusDynamicAimHookBoostUntil[Dummy] - CurrentTick));
+	RenderLine(aLine);
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
 }
 
 bool CControls::OnCursorMove(float x, float y, IInput::ECursorType CursorType)
@@ -509,6 +894,24 @@ float CControls::GetMaxMouseDistance() const
 
 bool CControls::CheckNewInput()
 {
+	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
+		return false;
+
+	if(GameClient()->m_Chat.IsActive() || GameClient()->m_Menus.IsActive() || !(m_aInputData[g_Config.m_ClDummy].m_PlayerFlags & PLAYERFLAG_PLAYING))
+	{
+		for(int Dummy = 0; Dummy < NUM_DUMMIES; ++Dummy)
+		{
+			m_aFastInput[Dummy] = m_aInputData[Dummy];
+			m_aBestPlusDynamicMovementBoostUntil[Dummy] = -1;
+			m_aBestPlusDynamicAimHookBoostUntil[Dummy] = -1;
+			m_aSkillAssistHookBufferUntil[Dummy] = -1;
+			m_aSkillAssistJumpBufferUntil[Dummy] = -1;
+		}
+		m_FastInputHookAction = false;
+		m_FastInputFireAction = false;
+		return false;
+	}
+
 	bool NewInput[2] = {};
 	for(int Dummy = 0; Dummy < NUM_DUMMIES; Dummy++)
 	{
@@ -520,6 +923,31 @@ bool CControls::CheckNewInput()
 				TestInput.m_Direction = -1;
 			if(!m_aInputDirectionLeft[Dummy] && m_aInputDirectionRight[Dummy])
 				TestInput.m_Direction = 1;
+
+			const int CurrentTick = Client()->GameTick(Dummy);
+			ApplySkillAssist(TestInput, Dummy, true);
+			if(m_aInputData[Dummy].m_Hook != 0)
+				TestInput.m_Hook = m_aInputData[Dummy].m_Hook;
+			else if(m_aFastInput[Dummy].m_Hook != 0 && CurrentTick > m_aSkillAssistHookBufferUntil[Dummy])
+				TestInput.m_Hook = 0;
+
+			if(CloudeInput::IsBestTargetMode())
+			{
+				const int MaxDistance = g_Config.m_ClDyncam ? g_Config.m_ClDyncamMaxDistance : g_Config.m_ClMouseMaxDistance;
+				CloudeInput::ApplyMouseTarget(TestInput, m_aMousePos[Dummy], g_Config.m_TcScaleMouseDistance, GameClient()->m_Snap.m_SpecInfo.m_Active, MaxDistance);
+			}
+		}
+
+		if(Dummy == g_Config.m_ClDummy && g_Config.m_TcFastInputBestPlusDynamicBoost && g_Config.m_TcFastInput)
+		{
+			const int CurrentTick = Client()->GameTick(g_Config.m_ClDummy);
+			const bool DirectionChanged = m_aFastInput[Dummy].m_Direction != TestInput.m_Direction;
+			const bool JumpPressed = m_aFastInput[Dummy].m_Jump != TestInput.m_Jump && TestInput.m_Jump != 0;
+			const bool HookPressed = m_aFastInput[Dummy].m_Hook == 0 && TestInput.m_Hook != 0;
+			if(DirectionChanged || JumpPressed)
+				m_aBestPlusDynamicMovementBoostUntil[Dummy] = maximum(m_aBestPlusDynamicMovementBoostUntil[Dummy], CurrentTick + 2);
+			if(HookPressed)
+				m_aBestPlusDynamicAimHookBoostUntil[Dummy] = maximum(m_aBestPlusDynamicAimHookBoostUntil[Dummy], CurrentTick + 1);
 		}
 
 		if(m_aFastInput[Dummy].m_Direction != TestInput.m_Direction)
@@ -536,13 +964,19 @@ bool CControls::CheckNewInput()
 			NewInput[Dummy] = true;
 		if(m_aFastInput[Dummy].m_WantedWeapon != TestInput.m_WantedWeapon)
 			NewInput[Dummy] = true;
+		if(Dummy == g_Config.m_ClDummy && CloudeInput::IsBestTargetMode() && (m_aFastInput[Dummy].m_TargetX != TestInput.m_TargetX || m_aFastInput[Dummy].m_TargetY != TestInput.m_TargetY))
+			NewInput[Dummy] = true;
 
 		bool SetMousePos = false;
 		// We need to be careful about how we manage the mouse position to avoid mispredicted hooks and fires
 		// on the first tick that they activate before we know what mouse position we actually sent to the server
 		if(Dummy == g_Config.m_ClDummy)
 		{
-			if(m_aFastInput[Dummy].m_Hook == 0 && TestInput.m_Hook == 1)
+			if(CloudeInput::IsBestTargetMode())
+			{
+				SetMousePos = true;
+			}
+			else if(m_aFastInput[Dummy].m_Hook == 0 && TestInput.m_Hook == 1)
 			{
 				m_FastInputHookAction = true;
 				SetMousePos = true;
@@ -560,8 +994,16 @@ bool CControls::CheckNewInput()
 
 		if(SetMousePos)
 		{
-			TestInput.m_TargetX = (int)m_aMousePos[Dummy].x;
-			TestInput.m_TargetY = (int)m_aMousePos[Dummy].y;
+			if(CloudeInput::IsBestTargetMode())
+			{
+				const int MaxDistance = g_Config.m_ClDyncam ? g_Config.m_ClDyncamMaxDistance : g_Config.m_ClMouseMaxDistance;
+				CloudeInput::ApplyMouseTarget(TestInput, m_aMousePos[Dummy], g_Config.m_TcScaleMouseDistance, GameClient()->m_Snap.m_SpecInfo.m_Active, MaxDistance);
+			}
+			else
+			{
+				TestInput.m_TargetX = (int)m_aMousePos[Dummy].x;
+				TestInput.m_TargetY = (int)m_aMousePos[Dummy].y;
+			}
 		}
 		else
 		{

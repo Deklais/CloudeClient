@@ -47,12 +47,12 @@ else()
 endif()
 
 if(TCLIENT_VERSION_PATCH STREQUAL "0")
-  project(TClient VERSION ${TCLIENT_VERSION_MAJOR}.${TCLIENT_VERSION_MINOR})
+  project(CloudeClient VERSION ${TCLIENT_VERSION_MAJOR}.${TCLIENT_VERSION_MINOR})
 else()
-  project(TClient VERSION ${TCLIENT_VERSION_MAJOR}.${TCLIENT_VERSION_MINOR}.${TCLIENT_VERSION_PATCH})
+  project(CloudeClient VERSION ${TCLIENT_VERSION_MAJOR}.${TCLIENT_VERSION_MINOR}.${TCLIENT_VERSION_PATCH})
 endif()
 
-file(APPEND "${DATA_VERSION_FILE}" "TClient ${TCLIENT_VERSION_MAJOR}.${TCLIENT_VERSION_MINOR}.${TCLIENT_VERSION_PATCH}\n")
+file(APPEND "${DATA_VERSION_FILE}" "CloudeClient ${TCLIENT_VERSION_MAJOR}.${TCLIENT_VERSION_MINOR}.${TCLIENT_VERSION_PATCH}\n")
 
 # </TClient>
 
@@ -1181,6 +1181,11 @@ set(EXPECTED_DATA
   background_noise.png
   blob.png
   censorlist.txt
+  cloude/media_island/fast-forward.png
+  cloude/media_island/pause.png
+  cloude/media_island/play.png
+  cloude/media_island/rewind.png
+  cloude/media_island/sound.png
   communityicons/none.png
   countryflags/AD.png
   countryflags/AE.png
@@ -1463,6 +1468,7 @@ set(EXPECTED_DATA
   countryflags/ZW.png
   countryflags/default.png
   countryflags/index.txt
+  data_version.txt
   deadtee.png
   debug_font.png
   editor/audio_source.png
@@ -1655,6 +1661,9 @@ set(EXPECTED_DATA
   shader/primex.vert
   shader/quad.frag
   shader/quad.vert
+  shader/sdf_rect.frag
+  shader/sdf_rect.fsh
+  shader/sdf_rect.vert
   shader/spritemulti.frag
   shader/spritemulti.vert
   shader/text.frag
@@ -1671,6 +1680,8 @@ set(EXPECTED_DATA
   shader/vulkan/primex.vert
   shader/vulkan/quad.frag
   shader/vulkan/quad.vert
+  shader/vulkan/sdf_rect.frag
+  shader/vulkan/sdf_rect.vert
   shader/vulkan/spritemulti.frag
   shader/vulkan/spritemulti.vert
   shader/vulkan/text.frag
@@ -1980,7 +1991,7 @@ set(EXPECTED_DATA
   wordlist.txt
 )
 
-set_glob(DATA GLOB_RECURSE "cfg;chai;frag;json;map;otf;png;rules;ttc;ttf;txt;vert;wv" data ${EXPECTED_DATA})
+set_glob(DATA GLOB_RECURSE "cfg;chai;frag;fsh;json;map;otf;png;rules;ttc;ttf;txt;vert;wv" data ${EXPECTED_DATA})
 
 ########################################################################
 # COPY DATA AND SHARED LIBS
@@ -2512,6 +2523,8 @@ if(CLIENT)
   set_src(GAME_CLIENT GLOB_RECURSE src/game/client
     animstate.cpp
     animstate.h
+    cloude_input.cpp
+    cloude_input.h
     component.cpp
     component.h
     components/background.cpp
@@ -2526,6 +2539,13 @@ if(CLIENT)
     components/censor.h
     components/chat.cpp
     components/chat.h
+    components/cloudeclient/aled_counter.cpp
+    components/cloudeclient/aled_counter.h
+    components/cloudeclient/media_island.cpp
+    components/cloudeclient/media_island.h
+    components/cloudeclient/menus_cloude.cpp
+    components/cloudeclient/rain_overlay.cpp
+    components/cloudeclient/rain_overlay.h
     components/community_icons.cpp
     components/community_icons.h
     components/console.cpp
@@ -2946,7 +2966,7 @@ if(CLIENT)
     target_compile_definitions(game-client PRIVATE CONF_WAVPACK_CLOSE_FILE)
   endif()
 
-  if(GLEW_BUNDLED)
+  if(GLEW_BUNDLED AND NOT TARGET_OS STREQUAL "windows")
     target_compile_definitions(game-client PRIVATE CONF_GLEW_HAS_CONTEXT_INIT)
   endif()
 

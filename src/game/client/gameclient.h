@@ -33,6 +33,9 @@
 #include "components/camera.h"
 #include "components/censor.h"
 #include "components/chat.h"
+#include "components/cloudeclient/aled_counter.h"
+#include "components/cloudeclient/media_island.h"
+#include "components/cloudeclient/rain_overlay.h"
 #include "components/console.h"
 #include "components/controls.h"
 #include "components/countryflags.h"
@@ -91,6 +94,7 @@
 #include <vector>
 
 class IMap;
+class CHttpRequest;
 
 class CGameInfo
 {
@@ -216,9 +220,11 @@ public:
 
 	// TClient Components
 	CSkinProfiles m_SkinProfiles;
+	CAledCounter m_AledCounter;
 	CStatusBar m_StatusBar;
 	CBindChat m_BindChat;
 	CBindWheel m_BindWheel;
+	CMediaIsland m_MediaIsland;
 	CBgDraw m_BgDraw;
 	CTClient m_TClient;
 	CTrails m_Trails;
@@ -227,13 +233,14 @@ public:
 	CPlayerIndicator m_PlayerIndicator;
 	COutlines m_Outlines;
 	CMumble m_Mumble;
+	CRainOverlay m_RainOverlay;
 	CRainbow m_Rainbow;
 	CWarList m_WarList;
 	CScripting m_Scripting;
 	CMod m_Mod;
 	CCustomCommunities m_CustomCommunities;
-	CMovingTiles m_MovingTilesBackground = CMovingTiles{ false };
-	CMovingTiles m_MovingTilesForeground = CMovingTiles{ true };
+	CMovingTiles m_MovingTilesBackground = CMovingTiles{false};
+	CMovingTiles m_MovingTilesForeground = CMovingTiles{true};
 
 private:
 	std::vector<class CComponent *> m_vpAll;
@@ -270,6 +277,10 @@ private:
 
 	void ProcessEvents();
 	void UpdatePositions();
+	void UpdateCloudeDevPresence();
+	void StartCloudeDevPresenceHeartbeat(const char *pServerAddress, int ClientId);
+	void StartCloudeDevPresenceList(const char *pServerAddress);
+	void FinishCloudeDevPresenceList();
 
 	int m_EditorMovementDelay = 5;
 	void UpdateEditorIngameMoved();
@@ -280,6 +291,12 @@ private:
 	int m_LastRoundStartTick;
 	int m_LastRaceTick;
 
+	bool m_CloudeDevLoggedIn = false;
+	int64_t m_CloudeDevNextHeartbeat = 0;
+	int64_t m_CloudeDevNextListRequest = 0;
+	char m_aCloudeDevPresenceServer[NETADDR_MAXSTRSIZE] = "";
+	std::shared_ptr<CHttpRequest> m_pCloudeDevHeartbeatRequest = nullptr;
+	std::shared_ptr<CHttpRequest> m_pCloudeDevListRequest = nullptr;
 	int m_LastFlagCarrierRed;
 	int m_LastFlagCarrierBlue;
 
@@ -289,7 +306,6 @@ private:
 	static void ConTeam(IConsole::IResult *pResult, void *pUserData);
 	static void ConKill(IConsole::IResult *pResult, void *pUserData);
 	static void ConReadyChange7(IConsole::IResult *pResult, void *pUserData);
-
 	static void ConchainLanguageUpdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainSpecialInfoupdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainSpecialDummyInfoupdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
@@ -544,6 +560,8 @@ public:
 		bool m_EmoticonIgnore;
 		bool m_Friend;
 		bool m_Foe;
+		bool m_CloudeDevBadge;
+		bool m_CloudeDevBadgeRemote;
 
 		int m_AuthLevel;
 		bool m_Afk;

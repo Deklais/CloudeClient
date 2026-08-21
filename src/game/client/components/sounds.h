@@ -14,9 +14,10 @@ class CSoundLoading : public IJob
 {
 	CGameClient *m_pGameClient;
 	bool m_Render;
+	char m_aSoundPack[64];
 
 public:
-	CSoundLoading(CGameClient *pGameClient, bool Render);
+	CSoundLoading(CGameClient *pGameClient, bool Render, const char *pSoundPack);
 	void Run() override;
 };
 
@@ -70,6 +71,7 @@ public:
 	void PlayAndRecord(int Channel, int SetId, float Volume, vec2 Position);
 	void Stop(int SetId);
 	bool IsPlaying(int SetId);
+	bool ReloadSoundPack(const char *pSoundPack);
 
 	ISound::CVoiceHandle PlaySample(int Channel, int SampleId, int Flags, float Volume);
 	ISound::CVoiceHandle PlaySampleAt(int Channel, int SampleId, int Flags, float Volume, vec2 Position);

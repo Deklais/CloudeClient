@@ -118,6 +118,17 @@ class CClient : public IClient, public CDemoPlayer::IListener
 	int m_UseTempRconCommands = 0;
 	int m_ExpectedRconCommands = -1;
 	int m_GotRconCommands = 0;
+	struct SRconCommandCacheEntry
+	{
+		std::string m_Name;
+		std::string m_Help;
+		std::string m_Params;
+	};
+	std::vector<SRconCommandCacheEntry> m_vRconCommandCache;
+	std::vector<SRconCommandCacheEntry> m_vPendingRconCommands;
+	char m_aRconCommandCacheAddress[NETADDR_MAXSTRSIZE] = "";
+	unsigned m_RconCommandCacheAuthHash = 0;
+	bool m_RconCommandCacheLoaded = false;
 	char m_aPassword[sizeof(g_Config.m_Password)] = "";
 	bool m_SendPassword = false;
 
@@ -309,7 +320,7 @@ public:
 	bool UseTempRconCommands() const override { return m_UseTempRconCommands != 0; }
 	void RconAuth(const char *pName, const char *pPassword, bool Dummy = g_Config.m_ClDummy) override;
 	void Rcon(const char *pCmd) override;
-	bool ReceivingRconCommands() const override { return m_ExpectedRconCommands > 0; }
+	bool ReceivingRconCommands() const override { return m_ExpectedRconCommands > 0 && !m_RconCommandCacheLoaded; }
 	float GotRconCommandsPercentage() const override;
 	bool ReceivingMaplist() const override { return m_ExpectedMaplistEntries > 0; }
 	float GotMaplistPercentage() const override;
@@ -520,7 +531,9 @@ public:
 	void DemoSliceBegin() override;
 	void DemoSliceEnd() override;
 	void DemoSlice(const char *pDstPath, CLIENTFUNC_FILTER pfnFilter, void *pUser) override;
-	virtual void SaveReplay(int Length, const char *pFilename = "");
+	void DemoRecorder_SaveReplay(int Length, const char *pFilename = "", const char *pFolder = "demos/replays", bool RequireReplayConfig = true) override;
+	void DemoRecorder_SaveReplayRaw(const char *pFilename, const char *pFolder) override;
+	void SaveReplay(int Length, const char *pFilename = "");
 
 	bool EditorHasUnsavedData() const override { return m_pEditor->HasUnsavedData(); }
 

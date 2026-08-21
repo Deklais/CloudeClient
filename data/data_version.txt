@@ -1,0 +1,2 @@
+DDNet 19.8.0
+CloudeClient 10.8.7

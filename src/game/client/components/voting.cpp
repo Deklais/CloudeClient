@@ -352,7 +352,15 @@ void CVoting::Render()
 		return;
 	}
 
-	CUIRect View = {0.0f, 60.0f, 120.0f, 38.0f};
+	const float ScreenHeight = 300.0f;
+	const float ScreenWidth = ScreenHeight * Graphics()->ScreenAspect();
+	CUIRect View = {
+		ScreenWidth * std::clamp(g_Config.m_TcHudVoteX / 1000.0f, 0.0f, 1.0f),
+		ScreenHeight * std::clamp(g_Config.m_TcHudVoteY / 1000.0f, 0.0f, 1.0f),
+		120.0f,
+		38.0f};
+	View.x = std::clamp(View.x, 0.0f, maximum(0.0f, ScreenWidth - View.w));
+	View.y = std::clamp(View.y, 0.0f, maximum(0.0f, ScreenHeight - View.h));
 	View.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), IGraphics::CORNER_R, 3.0f);
 	View.Margin(3.0f, &View);
 

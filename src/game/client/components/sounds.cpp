@@ -3,6 +3,7 @@
 
 #include "sounds.h"
 
+#include <base/log.h>
 #include <base/time.h>
 
 #include <engine/engine.h>
@@ -16,15 +17,17 @@
 #include <game/client/gameclient.h>
 #include <game/localization.h>
 
-CSoundLoading::CSoundLoading(CGameClient *pGameClient, bool Render) :
+CSoundLoading::CSoundLoading(CGameClient *pGameClient, bool Render, const char *pSoundPack) :
 	m_pGameClient(pGameClient),
 	m_Render(Render)
 {
+	str_copy(m_aSoundPack, pSoundPack);
 	Abortable(true);
 }
 
 void CSoundLoading::Run()
 {
+	int CustomSamplesLoaded = 0;
 	for(int s = 0; s < g_pData->m_NumSounds; s++)
 	{
 		const char *pLoadingCaption = Localize("Loading DDNet Client");
@@ -35,7 +38,25 @@ void CSoundLoading::Run()
 			if(State() == IJob::STATE_ABORTED)
 				return;
 
-			int Id = m_pGameClient->Sound()->LoadWV(g_pData->m_aSounds[s].m_aSounds[i].m_pFilename);
+			const char *pDefaultFilename = g_pData->m_aSounds[s].m_aSounds[i].m_pFilename;
+			int Id = -1;
+			if(str_comp(m_aSoundPack, "default") != 0 && str_valid_filename(m_aSoundPack))
+			{
+				const char *pBasename = str_rchr(pDefaultFilename, '/');
+				pBasename = pBasename != nullptr ? pBasename + 1 : pDefaultFilename;
+				char aCustomPath[IO_MAX_PATH_LENGTH];
+				str_format(aCustomPath, sizeof(aCustomPath), "assets/sounds/.cache/%s/%s", m_aSoundPack, pBasename);
+				if(!m_pGameClient->Storage()->FileExists(aCustomPath, IStorage::TYPE_SAVE))
+					str_format(aCustomPath, sizeof(aCustomPath), "assets/sounds/%s/%s", m_aSoundPack, pBasename);
+				if(m_pGameClient->Storage()->FileExists(aCustomPath, IStorage::TYPE_SAVE))
+				{
+					Id = m_pGameClient->Sound()->LoadWV(aCustomPath, IStorage::TYPE_SAVE);
+					if(Id >= 0)
+						CustomSamplesLoaded++;
+				}
+			}
+			if(Id < 0)
+				Id = m_pGameClient->Sound()->LoadWV(pDefaultFilename);
 			g_pData->m_aSounds[s].m_aSounds[i].m_Id = Id;
 			// try to render a frame
 			if(m_Render)
@@ -45,6 +66,7 @@ void CSoundLoading::Run()
 		if(m_Render)
 			m_pGameClient->m_Menus.RenderLoading(pLoadingCaption, pLoadingContent, 1);
 	}
+	log_info("sound", "Loaded sound pack '%s' (%d custom samples)", m_aSoundPack, CustomSamplesLoaded);
 }
 
 void CSounds::UpdateChannels()
@@ -109,16 +131,40 @@ void CSounds::OnInit()
 	// load sounds
 	if(g_Config.m_ClThreadsoundloading)
 	{
-		m_pSoundJob = std::make_shared<CSoundLoading>(GameClient(), false);
+		m_pSoundJob = std::make_shared<CSoundLoading>(GameClient(), false, g_Config.m_ClAssetSounds);
 		GameClient()->Engine()->AddJob(m_pSoundJob);
 		m_WaitForSoundJob = true;
 		GameClient()->m_Menus.RenderLoading(Localize("Loading DDNet Client"), Localize("Loading sound files"), 0);
 	}
 	else
 	{
-		CSoundLoading(GameClient(), true).Run();
+		CSoundLoading(GameClient(), true, g_Config.m_ClAssetSounds).Run();
 		m_WaitForSoundJob = false;
 	}
+}
+
+bool CSounds::ReloadSoundPack(const char *pSoundPack)
+{
+	if(m_WaitForSoundJob || pSoundPack == nullptr || !str_valid_filename(pSoundPack))
+		return false;
+
+	Sound()->StopAll();
+	ClearQueue();
+	for(int s = 0; s < g_pData->m_NumSounds; ++s)
+	{
+		for(int i = 0; i < g_pData->m_aSounds[s].m_NumSounds; ++i)
+		{
+			int &SampleId = g_pData->m_aSounds[s].m_aSounds[i].m_Id;
+			if(SampleId >= 0)
+				Sound()->UnloadSample(SampleId);
+			SampleId = -1;
+		}
+	}
+
+	m_pSoundJob = std::make_shared<CSoundLoading>(GameClient(), false, pSoundPack);
+	m_WaitForSoundJob = true;
+	GameClient()->Engine()->AddJob(m_pSoundJob);
+	return true;
 }
 
 void CSounds::OnReset()

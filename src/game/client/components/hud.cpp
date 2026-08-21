@@ -119,6 +119,9 @@ void CHud::OnInit()
 
 void CHud::RenderGameTimer()
 {
+	if(GameClient()->m_MediaIsland.ShouldHideDefaultTimer())
+		return;
+
 	float Half = m_Width / 2.0f;
 
 	if(!(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_SUDDENDEATH))
@@ -669,7 +672,10 @@ void CHud::RenderTextInfo()
 		else if(g_Config.m_TcShowFrozenText == 2)
 			str_format(aBuf, sizeof(aBuf), "%d / %d", NumFrozen, NumInTeam);
 		if(g_Config.m_TcShowFrozenText > 0)
-			TextRender()->Text(m_Width / 2.0f - TextRender()->TextWidth(10.0f, aBuf) / 2.0f, 12.0f, 10.0f, aBuf);
+		{
+			const float FrozenTextY = GameClient()->m_MediaIsland.ShouldHideDefaultTimer() ? 17.0f : 12.0f;
+			TextRender()->Text(m_Width / 2.0f - TextRender()->TextWidth(10.0f, aBuf) / 2.0f, FrozenTextY, 10.0f, aBuf);
+		}
 
 		// str_format(aBuf, sizeof(aBuf), "%d", GameClient()->m_aClients[GameClient()->m_Snap.m_LocalClientId].m_PrevPredicted.m_FreezeEnd);
 		// str_format(aBuf, sizeof(aBuf), "%d", g_Config.m_ClWhatsMyPing);

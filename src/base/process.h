@@ -39,6 +39,11 @@ enum class EShellExecuteWindowState
 	 * The process window is opened in the background without focus.
 	 */
 	BACKGROUND,
+
+	/**
+	 * The process window is hidden.
+	 */
+	HIDDEN,
 };
 
 /**

@@ -16,7 +16,10 @@
 #include <game/client/lineinput.h>
 #include <game/client/render.h>
 
+#include <memory>
 #include <vector>
+
+class CHttpRequest;
 
 class CTranslateResponse
 {
@@ -44,6 +47,12 @@ class CChat : public CComponent
 	class CLine
 	{
 	public:
+		struct SGifFrame
+		{
+			IGraphics::CTextureHandle m_Texture;
+			int m_DurationMs = 80;
+		};
+
 		CLine();
 		void Reset(CChat &This);
 
@@ -71,6 +80,15 @@ class CChat : public CComponent
 		int m_TimesRepeated;
 
 		std::shared_ptr<CTranslateResponse> m_pTranslateResponse;
+
+		std::shared_ptr<CHttpRequest> m_pGifRequest;
+		std::vector<SGifFrame> m_vGifFrames;
+		char m_aGifUrl[256];
+		int m_GifWidth;
+		int m_GifHeight;
+		int64_t m_GifStartTime;
+		int m_GifResolveDepth;
+		bool m_GifFailed;
 	};
 
 	bool m_PrevScoreBoardShowed;
@@ -150,9 +168,14 @@ class CChat : public CComponent
 	int m_PendingChatCounter;
 	int64_t m_LastChatSend;
 	int64_t m_aLastSoundPlayed[CHAT_NUM];
+	int64_t m_IgnoreTagSafeStart;
+	int m_IgnoreTagPendingCount;
+	char m_aIgnoreTagLastLine[512];
 	bool m_IsInputCensored;
 	char m_aCurrentInputText[MAX_LINE_LENGTH];
 	bool m_EditingNewLine;
+	std::shared_ptr<CHttpRequest> m_pHourRequest;
+	char m_aHourPlayer[MAX_NAME_LENGTH] = "";
 
 	bool m_ServerSupportsCommandInfo;
 
@@ -168,7 +191,19 @@ class CChat : public CComponent
 	static void ConchainChatWidth(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 
 	bool LineShouldHighlight(const char *pLine, const char *pName);
+	bool IsIgnoreTagActive() const;
+	bool IsFocusModeActive() const;
+	bool IsIgnoreTagSafe();
+	void UpdateIgnoreTag();
 	void StoreSave(const char *pText);
+	bool HandleSkinCommand(const char *pText);
+	bool HandleHourCommand(const char *pText);
+	void UpdateHourRequest();
+	void StartGifPreview(CLine &Line);
+	void RequestGifUrl(CLine &Line, const char *pUrl);
+	void UpdateGifPreviews();
+	bool DecodeGifPreview(CLine &Line, const unsigned char *pData, size_t DataSize);
+	IGraphics::CTextureHandle GifFrameTexture(const CLine &Line) const;
 
 	friend class CBindChat;
 	friend class CTranslate;

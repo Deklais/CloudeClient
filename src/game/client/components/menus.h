@@ -55,6 +55,7 @@ public:
 	int DoButton_CheckBox_Number(const void *pId, const char *pText, int Checked, const CUIRect *pRect);
 
 	bool DoSliderWithScaledValue(const void *pId, int *pOption, const CUIRect *pRect, const char *pStr, int Min, int Max, int Scale, const IScrollbarScale *pScale, unsigned Flags = 0u, const char *pSuffix = "");
+	bool DoSliderWithFloatValue(const void *pId, float *pOption, const CUIRect *pRect, const char *pStr, float Min, float Max, unsigned Flags = 0u, const char *pSuffix = "");
 	bool DoEditBoxWithLabel(CLineInput *LineInput, const CUIRect *pRect, const char *pLabel, const char *pDefault, char *pBuf, size_t BufSize);
 	bool DoLine_RadioMenu(CUIRect &View, const char *pLabel, std::vector<CButtonContainer> &vButtonContainers, const std::vector<const char *> &vLabels, const std::vector<int> &vValues, int &Value);
 	bool DoLine_KeyReader(CUIRect &View, CButtonContainer &ReaderButton, CButtonContainer &ClearButton, const char *pName, const char *pCommand);
@@ -79,6 +80,7 @@ public:
 	struct SCustomItem
 	{
 		IGraphics::CTextureHandle m_RenderTexture;
+		bool m_PreviewLoadAttempted = false;
 
 		char m_aName[50];
 
@@ -114,6 +116,12 @@ public:
 	{
 	};
 
+	struct SCustomSound : public SCustomItem
+	{
+		char m_aArchiveFilename[64] = {};
+		bool m_IsArchive = false;
+	};
+
 protected:
 	std::vector<SCustomEntities> m_vEntitiesList;
 	std::vector<SCustomGame> m_vGameList;
@@ -121,6 +129,7 @@ protected:
 	std::vector<SCustomParticle> m_vParticlesList;
 	std::vector<SCustomHud> m_vHudList;
 	std::vector<SCustomExtras> m_vExtrasList;
+	std::vector<SCustomSound> m_vSoundList;
 
 	bool m_IsInit = false;
 
@@ -132,6 +141,7 @@ protected:
 	static int ParticlesScan(const char *pName, int IsDir, int DirType, void *pUser);
 	static int HudScan(const char *pName, int IsDir, int DirType, void *pUser);
 	static int ExtrasScan(const char *pName, int IsDir, int DirType, void *pUser);
+	static int SoundsScan(const char *pName, int IsDir, int DirType, void *pUser);
 
 	static void ConchainAssetsEntities(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainAssetGame(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
@@ -691,6 +701,7 @@ public:
 		SETTINGS_DDNET,
 		SETTINGS_ASSETS,
 		SETTINGS_TCLIENT,
+		SETTINGS_ISLAND_CLIENT,
 		SETTINGS_PROFILES,
 		SETTINGS_CONFIGS,
 
@@ -846,6 +857,13 @@ private:
 	// found in menus_tclient.cpp
 	void RenderSettingsTClient(CUIRect MainView);
 	void RenderSettingsTClientSettings(CUIRect MainView);
+	void RenderSettingsTClientIslandClient(CUIRect MainView);
+	void RenderSettingsTClientCloudeInfo(CUIRect MainView);
+	void RenderSettingsTClientCloudeGame(CUIRect MainView);
+	void RenderSettingsTClientCloudeConfigs(CUIRect MainView);
+	void RenderSettingsTClientCloudeInput(CUIRect &Column);
+	void RenderSettingsTClientMicroAssist(CUIRect &Column);
+	void RenderSettingsTClientFocusMode(CUIRect &Column);
 	void RenderSettingsTClientBindWheel(CUIRect MainView);
 	void RenderSettingsTClientChatBinds(CUIRect MainView);
 	void RenderSettingsTClientWarList(CUIRect MainView);

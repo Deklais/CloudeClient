@@ -7,6 +7,9 @@
 #include <game/client/component.h>
 #include <game/client/render.h>
 
+#include <array>
+#include <deque>
+
 class CPlayers : public CComponent
 {
 	friend class CGhost;
@@ -20,7 +23,13 @@ class CPlayers : public CComponent
 		const CNetObj_Character *pPlayerChar,
 		const CTeeRenderInfo *pRenderInfo,
 		int ClientId,
-		float Intra = 0.f);
+		float Intra = 0.f,
+		float AlphaScale = 1.0f);
+	void RenderMotionBlurTrail(
+		const CNetObj_Character *pPrevChar,
+		const CNetObj_Character *pPlayerChar,
+		const CTeeRenderInfo *pRenderInfo,
+		int ClientId);
 	void RenderPlayerGhost(
 		const CNetObj_Character *pPrevChar,
 		const CNetObj_Character *pPlayerChar,
@@ -42,6 +51,14 @@ class CPlayers : public CComponent
 
 	int m_WeaponEmoteQuadContainerIndex;
 	int m_aWeaponSpriteMuzzleQuadContainerIndex[NUM_WEAPONS];
+
+	struct SMotionBlurSample
+	{
+		vec2 m_Position;
+		CNetObj_Character m_Character;
+		int64_t m_Time;
+	};
+	std::array<std::deque<SMotionBlurSample>, MAX_CLIENTS> m_aMotionBlurHistory;
 
 	void CreateNinjaTeeRenderInfo();
 	void CreateSpectatorTeeRenderInfo();

@@ -36,6 +36,7 @@
 #include <game/localization.h>
 
 #include <chrono>
+#include <cstdlib>
 
 using namespace std::chrono_literals;
 
@@ -118,6 +119,63 @@ void CMenus::RenderGame(CUIRect MainView)
 			{
 				Client()->DummyDisconnect(nullptr);
 				SetActive(false);
+			}
+		}
+	}
+
+	ButtonBar.VSplitRight(5.0f, &ButtonBar, nullptr);
+	ButtonBar.VSplitRight(120.0f, &ButtonBar, &Button);
+	static CButtonContainer s_LocalPlayButton;
+	if(DoButton_Menu(&s_LocalPlayButton, Localize("Local Play"), 0, &Button))
+	{
+		const char *pMapName = GameClient()->Map()->BaseName();
+		if(pMapName[0] == '\0')
+		{
+			Client()->AddWarning(SWarning(Localize("Could not start local server"), Localize("Current map is unknown.")));
+		}
+		else
+		{
+			char aMapFile[IO_MAX_PATH_LENGTH];
+			str_format(aMapFile, sizeof(aMapFile), "maps/%s.map", pMapName);
+			bool MapReady = Storage()->FileExists(aMapFile, IStorage::TYPE_ALL);
+			if(!MapReady)
+			{
+				void *pMapData = nullptr;
+				unsigned MapSize = 0;
+				if(Storage()->ReadFile(GameClient()->Map()->Path(), IStorage::TYPE_ALL, &pMapData, &MapSize))
+				{
+					Storage()->CreateFolder("maps", IStorage::TYPE_SAVE);
+					IOHANDLE File = Storage()->OpenFile(aMapFile, IOFLAG_WRITE, IStorage::TYPE_SAVE);
+					if(File)
+					{
+						io_write(File, pMapData, MapSize);
+						io_close(File);
+						MapReady = true;
+					}
+					free(pMapData);
+				}
+			}
+
+			if(!MapReady)
+			{
+				Client()->AddWarning(SWarning(Localize("Could not start local server"), Localize("Current map could not be prepared for local play.")));
+			}
+			else
+			{
+				char aMapCommand[256];
+				str_copy(aMapCommand, "sv_map \"");
+				char *pDst = aMapCommand + str_length(aMapCommand);
+				str_escape(&pDst, pMapName, aMapCommand + sizeof(aMapCommand) - 1);
+				str_append(aMapCommand, "\"");
+
+				if(GameClient()->m_LocalServer.IsServerRunning())
+					GameClient()->m_LocalServer.KillServer();
+
+				if(GameClient()->m_LocalServer.RunServer({"sv_register 0", aMapCommand}))
+				{
+					Client()->Connect("localhost");
+					SetActive(false);
+				}
 			}
 		}
 	}
